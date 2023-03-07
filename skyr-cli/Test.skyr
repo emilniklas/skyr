@@ -1,0 +1,5 @@
+f = fn() {
+  return "hello"
+}
+
+debug f().xyza
