@@ -9,7 +9,7 @@ use async_std::sync::RwLock;
 use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
-use crate::analyze::SymbolTable;
+use crate::analyze::{External, ImportMap, SymbolTable};
 use crate::Plan;
 use crate::State;
 use crate::{compile::*, ResourceId};
@@ -20,22 +20,31 @@ pub struct ExecutionContext<'a> {
     state: &'a State,
     table: &'a SymbolTable<'a>,
     bindings: Arc<RwLock<BTreeMap<NodeId, Value<'a>>>>,
+    import_map: ImportMap<'a>,
 }
 
 impl<'a> ExecutionContext<'a> {
-    pub fn new(state: &'a State, table: &'a SymbolTable<'a>) -> Self {
+    pub fn new(state: &'a State, table: &'a SymbolTable<'a>, import_map: ImportMap<'a>) -> Self {
         Self {
             parent: None,
             state,
             table,
             bindings: Default::default(),
+            import_map,
+        }
+    }
+
+    pub fn new_empty(&self) -> ExecutionContext<'a> {
+        ExecutionContext {
+            bindings: Default::default(),
+            ..self.clone()
         }
     }
 
     pub fn inner(&self) -> ExecutionContext<'a> {
         ExecutionContext {
             parent: Some(Box::new(self.clone())),
-            ..self.clone()
+            ..self.new_empty()
         }
     }
 
@@ -67,19 +76,38 @@ impl<'a> Executor<'a> {
         self.plan.into_inner()
     }
 
-    pub async fn execute_module(&self, ctx: ExecutionContext<'a>, module: &'a Module) {
-        let fo = FuturesUnordered::new();
+    pub fn execute_module(
+        &self,
+        ctx: ExecutionContext<'a>,
+        module: &'a Module,
+    ) -> Pin<Box<dyn '_ + Future<Output = Value<'a>>>> {
+        Box::pin(async move {
+            let mut exports = vec![];
 
-        let mut values = vec![];
-        for statement in module.statements.iter() {
-            values.push(self.execute_statement(ctx.clone(), statement).await);
-        }
+            let mut values = vec![];
+            for statement in module.statements.iter() {
+                if let Statement::Assignment(a) = statement {
+                    let v = self.execute_assignment(ctx.clone(), a).await;
+                    exports.push((a.identifier.symbol.clone(), v.clone()));
+                    values.push(v);
+                } else {
+                    values.push(self.execute_statement(ctx.clone(), statement).await);
+                }
+            }
 
-        for value in values {
-            fo.push(value.resolve(self));
-        }
+            let fo = FuturesUnordered::new();
+            for value in values {
+                fo.push(value.resolve(self));
+            }
+            fo.collect::<Vec<_>>().await;
 
-        fo.collect::<Vec<_>>().await;
+            let fo = FuturesUnordered::new();
+            for (name, value) in exports {
+                fo.push(async move { (name, value.resolve(self).await) });
+            }
+
+            Value::Record(fo.collect::<Vec<_>>().await)
+        })
     }
 
     pub async fn execute_statement(
@@ -97,6 +125,7 @@ impl<'a> Executor<'a> {
             }
             Statement::Return(r) => return self.execute_expression(ctx, &r.expression),
             Statement::TypeDefinition(_) => Value::Nil,
+            Statement::Import(i) => self.execute_import(ctx, i).await,
         };
         Value::defer(move |e| {
             let exp = exp.clone();
@@ -109,6 +138,18 @@ impl<'a> Executor<'a> {
                 Value::Nil
             })
         })
+    }
+
+    pub async fn execute_import(&self, ctx: ExecutionContext<'a>, import: &'a Import) -> Value<'a> {
+        let external = ctx.import_map.resolve(import).expect("unresolved import");
+
+        let value = match external {
+            External::Module(m) => self.execute_module(ctx.new_empty(), m).await,
+        };
+
+        ctx.bindings.write().await.insert(import.id, value.clone());
+
+        value
     }
 
     pub async fn execute_assignment(
@@ -214,29 +255,29 @@ impl<'a> Executor<'a> {
                         } else {
                             panic!("cannot construct {:?}", subject);
                         }
-                    }
+                    } /*
+                      Expression::Test(_) => Value::Function(Arc::new(move |executor, args| {
+                          let id = ResourceId::Named(format!("{:?}", args[0]));
+                          Box::pin(async move {
+                              match ctx.state.get(&id) {
+                                  None => {
+                                      let dependencies = args[0].dependencies();
+                                      if !dependencies.is_empty() {
+                                          return Value::Pending(dependencies);
+                                      }
 
-                    Expression::Test(_) => Value::Function(Arc::new(move |executor, args| {
-                        let id = ResourceId::Named(format!("{:?}", args[0]));
-                        Box::pin(async move {
-                            match ctx.state.get(&id) {
-                                None => {
-                                    let dependencies = args[0].dependencies();
-                                    if !dependencies.is_empty() {
-                                        return Value::Pending(dependencies);
-                                    }
-
-                                    let mut plan = executor.plan.write().await;
-                                    plan.register_create(id.clone(), args[0].clone());
-                                    Value::Pending(vec![id])
-                                }
-                                Some(_resource) => Value::Record(vec![(
-                                    "hello".into(),
-                                    Value::String("wow".into()),
-                                )]),
-                            }
-                        })
-                    })),
+                                      let mut plan = executor.plan.write().await;
+                                      plan.register_create(id.clone(), args[0].clone());
+                                      Value::Pending(vec![id])
+                                  }
+                                  Some(_resource) => Value::Record(vec![(
+                                      "hello".into(),
+                                      Value::String("wow".into()),
+                                  )]),
+                              }
+                          })
+                      })),
+                      */
                 }
             })
         })
@@ -328,21 +369,17 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
             Value::String(s) => fmt::Debug::fmt(s, f),
             Value::Nil => write!(f, "<nil>"),
             Value::Record(fields) => {
-                if fields.is_empty() {
-                    write!(f, "{{}}")
-                } else {
-                    let mut s = f.debug_map();
-                    for (name, value) in fields.iter() {
-                        s.entry(
-                            &DisplayAsDebug(name),
-                            &TrackedFmtValue {
-                                value,
-                                arcs: self.arcs,
-                            },
-                        );
-                    }
-                    s.finish()
+                let mut s = f.debug_map();
+                for (name, value) in fields.iter() {
+                    s.entry(
+                        &DisplayAsDebug(name),
+                        &TrackedFmtValue {
+                            value,
+                            arcs: self.arcs,
+                        },
+                    );
                 }
+                s.finish()
             }
             Value::Function(_) => write!(f, "<fn>"),
             Value::Pending(_) => write!(f, "<pending>"),

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::compile::{
-    Assignment, CompileError, Expression, Function, Identifier, Module, NodeId, Parameter, Record,
-    TypeDefinition, TypeExpression, Visitable, Visitor,
+    Assignment, CompileError, Expression, Function, Identifier, Import, Module, NodeId, Parameter,
+    Record, TypeDefinition, TypeExpression, Visitable, Visitor,
 };
 
 #[derive(Debug)]
@@ -55,6 +55,7 @@ pub enum Declaration<'a> {
     Assignment(&'a Assignment),
     TypeDefinition(&'a TypeDefinition),
     Parameter(&'a Parameter),
+    Import(&'a Import),
 }
 
 impl<'a> Declaration<'a> {
@@ -63,6 +64,7 @@ impl<'a> Declaration<'a> {
             Declaration::Assignment(a) => a.id,
             Declaration::TypeDefinition(a) => a.id,
             Declaration::Parameter(a) => a.id,
+            Declaration::Import(a) => a.id,
         }
     }
 
@@ -71,6 +73,7 @@ impl<'a> Declaration<'a> {
             Declaration::Assignment(a) => a.identifier == *id,
             Declaration::TypeDefinition(a) => a.identifier == *id,
             Declaration::Parameter(a) => a.identifier == *id,
+            Declaration::Import(a) => a.identifier == *id,
         }
     }
 }
@@ -177,6 +180,10 @@ impl<'a> Visitor<'a> for SymbolCollector<'a> {
     fn enter_parameter(&mut self, parameter: &'a Parameter) {
         self.scope
             .add_declaration(Declaration::Parameter(parameter));
+    }
+
+    fn enter_import(&mut self, import: &'a Import) {
+        self.scope.add_declaration(Declaration::Import(import));
     }
 
     fn enter_expression(&mut self, expression: &'a Expression) {

@@ -10,6 +10,9 @@ pub use plan::*;
 mod program;
 pub use program::*;
 
+mod plugin;
+pub use plugin::*;
+
 pub mod compile;
 pub mod analyze;
 pub mod execute;

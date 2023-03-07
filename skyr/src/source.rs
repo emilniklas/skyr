@@ -1,4 +1,4 @@
-use crate::compile::{CompileError, Module, Lexer, Parser};
+use crate::compile::{CompileError, Lexer, Module, Parser, TokenKind};
 
 #[derive(Debug)]
 pub struct Source {
@@ -18,5 +18,23 @@ impl Source {
         let tokens = Lexer::new(&self.code).collect::<Vec<_>>();
         let (module, _) = Module::parse(&tokens).map_err(CompileError::ParseError)?;
         Ok(module)
+    }
+
+    pub fn module_name(&self) -> Option<String> {
+        self.name
+            .split('/')
+            .flat_map(|s| s.split('\\'))
+            .last()
+            .and_then(|s| s.split('.').next())
+            .and_then(|s| {
+                let tokens = Lexer::new(s).collect::<Vec<_>>();
+                if tokens.len() != 1 {
+                    None
+                } else if let TokenKind::Symbol(s) = tokens[0].kind {
+                    Some(s.into())
+                } else {
+                    None
+                }
+            })
     }
 }

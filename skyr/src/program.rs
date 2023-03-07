@@ -1,4 +1,4 @@
-use crate::analyze::{SymbolCollector, SymbolTable, TypeChecker};
+use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
 use crate::{Plan, Source, State};
@@ -16,7 +16,12 @@ impl Program {
         let mut error = None;
         let mut modules = vec![];
         for source in &self.sources {
-            modules.extend(CompileError::coalesce(source.parse(), &mut error));
+            modules.extend(
+                CompileError::coalesce(source.parse(), &mut error).map(|mut module| {
+                    module.name = source.module_name();
+                    module
+                }),
+            );
         }
         if let Some(error) = error {
             Err(error)
@@ -40,7 +45,8 @@ impl ParsedProgram {
         }
         let mut table = collector.finalize(&mut error);
 
-        let mut checker = TypeChecker::new(&mut table);
+        let import_map = ImportMap::new(self.modules.as_slice());
+        let mut checker = TypeChecker::new(&mut table, import_map.clone());
         for module in self.modules.iter() {
             checker.check_module(module);
         }
@@ -54,6 +60,7 @@ impl ParsedProgram {
             Err(error)
         } else {
             Ok(AnalyzedProgram {
+                import_map,
                 modules: &self.modules,
                 table,
             })
@@ -62,13 +69,14 @@ impl ParsedProgram {
 }
 
 pub struct AnalyzedProgram<'a> {
+    import_map: ImportMap<'a>,
     modules: &'a Vec<Module>,
     table: SymbolTable<'a>,
 }
 
 impl<'a> AnalyzedProgram<'a> {
     pub async fn plan(&'a self, state: &'a State) -> Plan<'a> {
-        let ctx = ExecutionContext::new(state, &self.table);
+        let ctx = ExecutionContext::new(state, &self.table, self.import_map.clone());
 
         let executor = Executor::new();
         for module in self.modules {

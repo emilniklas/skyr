@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use crate::compile::*;
 
-use super::{Declaration, SymbolTable};
+use super::{Declaration, External, ImportMap, SymbolTable};
 
 #[derive(Debug)]
 pub enum TypeError {
@@ -26,6 +26,11 @@ pub enum TypeError {
     WrongNumberOfArguments {
         lhs: usize,
         rhs: usize,
+        span: Span,
+    },
+
+    UnresolvedImport {
+        name: String,
         span: Span,
     },
 }
@@ -184,12 +189,14 @@ pub struct TypeChecker<'t, 'a> {
     cache: BTreeMap<NodeId, Type>,
     checking: BTreeMap<NodeId, Vec<Type>>,
     errors: Vec<TypeError>,
+    import_map: ImportMap<'a>,
 }
 
 impl<'t, 'a> TypeChecker<'t, 'a> {
-    pub fn new(symbols: &'t mut SymbolTable<'a>) -> Self {
+    pub fn new(symbols: &'t mut SymbolTable<'a>, import_map: ImportMap<'a>) -> Self {
         Self {
             symbols,
+            import_map,
             cache: Default::default(),
             checking: Default::default(),
             errors: Default::default(),
@@ -200,10 +207,40 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         self.errors
     }
 
-    pub fn check_module(&mut self, module: &'a Module) {
-        for statement in module.statements.iter() {
-            self.check_statement(statement);
+    pub fn check_module(&mut self, module: &'a Module) -> Type {
+        if let Some(t) = self.cache.get(&module.id) {
+            return t.clone();
         }
+
+        if let Some(c) = self.checking.get_mut(&module.id) {
+            let type_ = Type::open();
+            c.push(type_.clone());
+            return type_;
+        }
+
+        self.checking.insert(module.id, vec![]);
+
+        let mut exports = vec![];
+
+        for statement in module.statements.iter() {
+            if let Statement::Assignment(n) = statement {
+                exports.push((n.identifier.symbol.clone(), self.check_assignment(n)));
+            } else {
+                self.check_statement(statement);
+            }
+        }
+
+        let type_ = Type::Record(exports);
+
+        let mut env = TypeEnvironment::new(&mut self.errors);
+
+        let mut type_ = type_;
+        for recursive in self.checking.remove(&module.id).unwrap_or_default() {
+            type_ = env.unify(type_, recursive, &module.span);
+        }
+
+        self.cache.insert(module.id, type_.clone());
+        type_
     }
 
     pub fn check_statement(&mut self, statement: &'a Statement) -> Type {
@@ -213,8 +250,30 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Statement::TypeDefinition(n) => self.check_type_definition(n),
             Statement::Return(n) => return self.check_expression(&n.expression),
             Statement::Debug(n) => self.check_expression(&n.expression),
+            Statement::Import(n) => self.check_import(n),
         };
         Type::Void
+    }
+
+    pub fn check_import(&mut self, import: &'a Import) -> Type {
+        if let Some(t) = self.cache.get(&import.id) {
+            return t.clone();
+        }
+        let type_ = self
+            .import_map
+            .resolve(import)
+            .map(|i| match i {
+                External::Module(m) => self.check_module(m),
+            })
+            .unwrap_or_else(|| {
+                self.errors.push(TypeError::UnresolvedImport {
+                    name: import.identifier.symbol.clone(),
+                    span: import.span.clone(),
+                });
+                Type::default()
+            });
+        self.cache.insert(import.id, type_.clone());
+        type_
     }
 
     pub fn check_type_definition(&mut self, typedef: &'a TypeDefinition) -> Type {
@@ -257,11 +316,6 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Expression::Call(c) => self.check_call(c),
             Expression::Construct(c) => self.check_construct(c),
             Expression::MemberAccess(ma) => self.check_member_access(ma),
-
-            Expression::Test(_) => Type::Function(
-                vec![Type::Record(vec![("tes".into(), Type::String)])],
-                Box::new(Type::Record(vec![("hello".into(), Type::String)])),
-            ),
         }
     }
 
@@ -378,6 +432,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
                 .unwrap_or_default(),
             Declaration::Assignment(a) => self.check_assignment(a),
             Declaration::TypeDefinition(td) => self.check_type_definition(td),
+            Declaration::Import(i) => self.check_import(i),
         }
     }
 
@@ -495,9 +550,9 @@ impl Type {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
             Type::Record(fields) => {
-                let mut s = f.debug_struct("");
+                let mut s = f.debug_map();
                 for field in fields {
-                    s.field(&field.0, &field.1);
+                    s.entry(&DisplayAsDebug(&field.0), &field.1);
                 }
                 s.finish()
             }
@@ -541,5 +596,13 @@ impl Default for Type {
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.pretty_fmt(f, &mut vec![])
+    }
+}
+
+struct DisplayAsDebug<T>(T);
+
+impl<T: fmt::Display> fmt::Debug for DisplayAsDebug<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }

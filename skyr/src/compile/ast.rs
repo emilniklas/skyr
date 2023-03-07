@@ -77,6 +77,9 @@ pub trait Visitor<'a> {
 
     fn enter_call(&mut self, call: &'a Call) {}
     fn leave_call(&mut self, call: &'a Call) {}
+
+    fn enter_import(&mut self, import: &'a Import) {}
+    fn leave_import(&mut self, import: &'a Import) {}
 }
 
 pub trait Visitable {
@@ -85,7 +88,9 @@ pub trait Visitable {
 
 #[derive(Debug)]
 pub struct Module {
+    pub id: NodeId,
     pub span: Span,
+    pub name: Option<String>,
     pub statements: Vec<Statement>,
 }
 
@@ -114,6 +119,8 @@ impl Parser for Module {
         }
         Ok((
             Module {
+                id: NodeId::new(),
+                name: None,
                 span: start..end,
                 statements,
             },
@@ -129,6 +136,7 @@ pub enum Statement {
     TypeDefinition(TypeDefinition),
     Return(Return),
     Debug(Debug),
+    Import(Import),
 }
 
 impl Visitable for Statement {
@@ -140,6 +148,7 @@ impl Visitable for Statement {
             Statement::TypeDefinition(n) => n.visit(visitor),
             Statement::Return(n) => n.visit(visitor),
             Statement::Debug(n) => n.visit(visitor),
+            Statement::Import(n) => n.visit(visitor),
         }
         visitor.leave_statement(self);
     }
@@ -153,6 +162,7 @@ impl HasSpan for Statement {
             Statement::TypeDefinition(a) => a.span.clone(),
             Statement::Return(r) => r.span.clone(),
             Statement::Debug(r) => r.span.clone(),
+            Statement::Import(r) => r.span.clone(),
         }
     }
 }
@@ -184,6 +194,14 @@ impl Parser for Statement {
             }) => {
                 let (ret, tokens) = Debug::parse(tokens)?;
                 return Ok((Statement::Debug(ret), tokens));
+            }
+
+            Some(Token {
+                kind: TokenKind::ImportKeyword,
+                ..
+            }) => {
+                let (import, tokens) = Import::parse(tokens)?;
+                return Ok((Statement::Import(import), tokens));
             }
 
             _ => {}
@@ -260,9 +278,6 @@ pub enum Expression {
     MemberAccess(Box<MemberAccess>),
     Function(Box<Function>),
     Call(Box<Call>),
-
-    // TODO: remove
-    Test(Span),
 }
 
 impl Visitable for Expression {
@@ -276,7 +291,6 @@ impl Visitable for Expression {
             Expression::MemberAccess(n) => n.visit(visitor),
             Expression::Function(n) => n.visit(visitor),
             Expression::Call(n) => n.visit(visitor),
-            Expression::Test(_) => {}
         }
         visitor.leave_expression(self);
     }
@@ -292,7 +306,6 @@ impl HasSpan for Expression {
             Expression::MemberAccess(n) => n.span.clone(),
             Expression::Function(n) => n.span.clone(),
             Expression::Call(n) => n.span.clone(),
-            Expression::Test(span) => span.clone(),
         }
     }
 }
@@ -334,13 +347,6 @@ impl Parser for LeafExpression {
             }) => {
                 let (function, tokens) = Function::parse(tokens)?;
                 Ok((Expression::Function(Box::new(function)), tokens))
-            }
-
-            Some(Token {
-                kind: TokenKind::TestKeyword,
-                ..
-            }) => {
-                Ok((Expression::Test(tokens[0].span.clone()), &tokens[1..]))
             }
 
             t => Err(ParseError::Expected(
@@ -1128,5 +1134,52 @@ impl Visitable for Call {
             argument.visit(visitor);
         }
         visitor.leave_call(self);
+    }
+}
+
+#[derive(Debug)]
+pub struct Import {
+    pub id: NodeId,
+    pub span: Span,
+    pub identifier: Identifier,
+}
+
+impl Visitable for Import {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_import(self);
+        self.identifier.visit(visitor);
+        visitor.leave_import(self);
+    }
+}
+
+impl Parser for Import {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::ImportKeyword,
+            ..
+        }) = tokens.get(0)
+        {
+            start = tokens[0].span.start;
+            tokens = &tokens[1..];
+        } else {
+            return Err(ParseError::Expected(
+                "import statement",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let (identifier, tokens) = Identifier::parse(tokens)?;
+
+        Ok((
+            Self {
+                id: Default::default(),
+                span: start..identifier.span.end,
+                identifier,
+            },
+            tokens,
+        ))
     }
 }
