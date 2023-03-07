@@ -1,5 +1,9 @@
-f = fn() {
-  return "hello"
+x = test {
+  tes: "hello"
 }
 
-debug f().xyza
+y = test {
+  tes: x.hello
+}
+
+debug y.hello

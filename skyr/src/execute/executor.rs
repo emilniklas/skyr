@@ -10,9 +10,9 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::SymbolTable;
-use crate::compile::*;
 use crate::Plan;
 use crate::State;
+use crate::{compile::*, ResourceId};
 
 #[derive(Clone)]
 pub struct ExecutionContext<'a> {
@@ -122,7 +122,11 @@ impl<'a> Executor<'a> {
         value
     }
 
-    pub async fn execute_record(&self, ctx: ExecutionContext<'a>, record: &'a Record<Expression>) -> Value<'a> {
+    pub async fn execute_record(
+        &self,
+        ctx: ExecutionContext<'a>,
+        record: &'a Record<Expression>,
+    ) -> Value<'a> {
         Value::Record({
             let mut fo = FuturesOrdered::new();
             for f in &record.fields {
@@ -156,6 +160,11 @@ impl<'a> Executor<'a> {
                             .execute_expression(ctx.clone(), &c.callee)
                             .resolve(executor)
                             .await;
+
+                        if let Value::Pending(deps) = callee {
+                            return Value::Pending(deps);
+                        }
+
                         if let Value::Function(f) = callee {
                             let mut fo = FuturesOrdered::new();
                             for arg in &c.arguments {
@@ -174,6 +183,10 @@ impl<'a> Executor<'a> {
                             .resolve(executor)
                             .await;
 
+                        if let Value::Pending(deps) = subject {
+                            return Value::Pending(deps);
+                        }
+
                         if let Value::Record(r) = subject {
                             for (n, v) in &r {
                                 if ma.identifier.symbol == *n {
@@ -191,6 +204,10 @@ impl<'a> Executor<'a> {
                             .resolve(executor)
                             .await;
 
+                        if let Value::Pending(deps) = subject {
+                            return Value::Pending(deps);
+                        }
+
                         if let Value::Function(f) = subject {
                             let args = vec![executor.execute_record(ctx, &construct.record).await];
                             f(executor, args).await
@@ -198,6 +215,28 @@ impl<'a> Executor<'a> {
                             panic!("cannot construct {:?}", subject);
                         }
                     }
+
+                    Expression::Test(_) => Value::Function(Arc::new(move |executor, args| {
+                        let id = ResourceId::Named(format!("{:?}", args[0]));
+                        Box::pin(async move {
+                            match ctx.state.get(&id) {
+                                None => {
+                                    let dependencies = args[0].dependencies();
+                                    if !dependencies.is_empty() {
+                                        return Value::Pending(dependencies);
+                                    }
+
+                                    let mut plan = executor.plan.write().await;
+                                    plan.register_create(id.clone(), args[0].clone());
+                                    Value::Pending(vec![id])
+                                }
+                                Some(_resource) => Value::Record(vec![(
+                                    "hello".into(),
+                                    Value::String("wow".into()),
+                                )]),
+                            }
+                        })
+                    })),
                 }
             })
         })
@@ -251,6 +290,7 @@ pub enum Value<'a> {
                 ) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>>,
         >,
     ),
+    Pending(Vec<ResourceId>),
 }
 
 struct TrackedFmtValue<'v, 'a> {
@@ -305,11 +345,28 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 }
             }
             Value::Function(_) => write!(f, "<fn>"),
+            Value::Pending(_) => write!(f, "<pending>"),
         }
     }
 }
 
-impl<'a> Value<'a> {}
+impl<'a> Value<'a> {
+    pub fn dependencies(&self) -> Vec<ResourceId> {
+        match self {
+            Value::Nil | Value::String(_) => vec![],
+            Value::Deferred(_) => panic!("cannot get dependencies from deferred"),
+            Value::Record(r) => {
+                let mut result = vec![];
+                for (_, v) in r {
+                    result.extend(v.dependencies());
+                }
+                result
+            }
+            Value::Function(_) => todo!(),
+            Value::Pending(ids) => ids.clone(),
+        }
+    }
+}
 
 impl<'a> fmt::Debug for Value<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

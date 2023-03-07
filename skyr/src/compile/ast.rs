@@ -260,6 +260,9 @@ pub enum Expression {
     MemberAccess(Box<MemberAccess>),
     Function(Box<Function>),
     Call(Box<Call>),
+
+    // TODO: remove
+    Test(Span),
 }
 
 impl Visitable for Expression {
@@ -273,6 +276,7 @@ impl Visitable for Expression {
             Expression::MemberAccess(n) => n.visit(visitor),
             Expression::Function(n) => n.visit(visitor),
             Expression::Call(n) => n.visit(visitor),
+            Expression::Test(_) => {}
         }
         visitor.leave_expression(self);
     }
@@ -288,6 +292,7 @@ impl HasSpan for Expression {
             Expression::MemberAccess(n) => n.span.clone(),
             Expression::Function(n) => n.span.clone(),
             Expression::Call(n) => n.span.clone(),
+            Expression::Test(span) => span.clone(),
         }
     }
 }
@@ -329,6 +334,13 @@ impl Parser for LeafExpression {
             }) => {
                 let (function, tokens) = Function::parse(tokens)?;
                 Ok((Expression::Function(Box::new(function)), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::TestKeyword,
+                ..
+            }) => {
+                Ok((Expression::Test(tokens[0].span.clone()), &tokens[1..]))
             }
 
             t => Err(ParseError::Expected(

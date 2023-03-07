@@ -67,10 +67,11 @@ pub struct AnalyzedProgram<'a> {
 }
 
 impl<'a> AnalyzedProgram<'a> {
-    pub async fn plan(&'a mut self, state: &'a State) -> Plan<'a> {
+    pub async fn plan(&'a self, state: &'a State) -> Plan<'a> {
         let ctx = ExecutionContext::new(state, &self.table);
-        let executor = Executor::default();
-        for module in self.modules.iter() {
+
+        let executor = Executor::new();
+        for module in self.modules {
             executor.execute_module(ctx.clone(), module).await;
         }
         executor.finalize()

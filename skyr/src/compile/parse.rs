@@ -26,6 +26,9 @@ pub enum TokenKind<'a> {
     ReturnKeyword,
     DebugKeyword,
 
+    // TODO: remove this temporary thing
+    TestKeyword,
+
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
 
@@ -133,6 +136,8 @@ impl<'a> Lexer<'a> {
             "fn" => TokenKind::FnKeyword,
             "return" => TokenKind::ReturnKeyword,
             "debug" => TokenKind::DebugKeyword,
+            // TODO: remove
+            "test" => TokenKind::TestKeyword,
             _ => TokenKind::Symbol(symbol),
         }
     }

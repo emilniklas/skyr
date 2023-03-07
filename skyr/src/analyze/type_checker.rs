@@ -257,6 +257,11 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Expression::Call(c) => self.check_call(c),
             Expression::Construct(c) => self.check_construct(c),
             Expression::MemberAccess(ma) => self.check_member_access(ma),
+
+            Expression::Test(_) => Type::Function(
+                vec![Type::Record(vec![("tes".into(), Type::String)])],
+                Box::new(Type::Record(vec![("hello".into(), Type::String)])),
+            ),
         }
     }
 

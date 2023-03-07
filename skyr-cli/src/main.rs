@@ -1,5 +1,4 @@
-use futures::FutureExt;
-use std::io;
+use std::io::{self, BufRead, Write};
 
 use clap::Parser;
 use glob;
@@ -12,7 +11,7 @@ struct SkyrCli {
 
 #[derive(Parser)]
 enum Command {
-    Plan,
+    Apply,
 }
 
 #[async_std::main]
@@ -20,11 +19,11 @@ async fn main() -> io::Result<()> {
     let SkyrCli { command } = Parser::parse();
 
     match command {
-        Command::Plan => plan().await,
+        Command::Apply => apply().await,
     }
 }
 
-async fn plan() -> io::Result<()> {
+async fn apply() -> io::Result<()> {
     let files = glob::glob("**/*.skyr").map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let files = files
         .collect::<Result<Vec<_>, _>>()
@@ -35,7 +34,7 @@ async fn plan() -> io::Result<()> {
             let code = async_std::fs::read_to_string(&path).await?;
             Ok(skyr::Source::new(path.display().to_string(), code))
         })),
-        async_std::fs::read(".skyr.state").map(|r| r.unwrap_or_default()),
+        async_std::fs::read(".skyr.state"),
     )
     .await;
 
@@ -44,13 +43,38 @@ async fn plan() -> io::Result<()> {
     let program = skyr::Program::new(sources)
         .compile()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let mut program = program
+    let program = program
         .analyze()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    let state = skyr::State::open(statefile.as_slice())?;
+    let state = statefile
+        .and_then(|s| skyr::State::open(s.as_slice()))
+        .unwrap_or_default();
 
-    println!("{:#?}", program.plan(&state).await);
+    {
+        let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
+        let mut plan = program.plan(&state).await;
+        while !plan.is_empty() {
+            print!("{:?}\n\nContinue? ", plan);
+            io::stdout().flush()?;
+
+            let mut line = String::new();
+            stdin.read_line(&mut line)?;
+
+            if line != "yes\n" {
+                break;
+            }
+
+            plan = plan.execute(&program, &state).await;
+        }
+    }
+
+    state.save(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(".skyr.state")?,
+    )?;
 
     Ok(())
 }
