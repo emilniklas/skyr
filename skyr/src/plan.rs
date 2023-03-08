@@ -30,11 +30,12 @@ pub struct Plan<'a> {
 
 impl<'a> fmt::Debug for Plan<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, (_, value)) in self.debug_messages.iter().enumerate() {
-            if i > 0 {
-                write!(f, "\n")?;
-            }
-            write!(f, "ℹ️ {}", value)?;
+        for (_, value) in self.debug_messages.iter() {
+            write!(f, "ℹ️ {}\n", value)?;
+        }
+
+        if self.is_empty() {
+            return write!(f, "✅ Empty plan");
         }
 
         for (i, (id, kind)) in self.steps.iter().enumerate() {

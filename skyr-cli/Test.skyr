@@ -10,9 +10,9 @@ id2 = Random.Identifier {
   byteLength: 4
 }
 
+debug id1.hex
+
 id3 = Random.Identifier {
   name: id2.hex
-  byteLength: 4
+  byteLength: 3
 }
-
-debug id3.hex

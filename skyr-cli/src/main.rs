@@ -91,6 +91,11 @@ async fn apply(approve: bool) -> io::Result<ExitCode> {
     {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let mut plan = program.plan(&state).await;
+
+        if plan.is_empty() {
+            println!("{:?}", plan);
+        }
+
         while !plan.is_empty() {
             if !approve {
                 print!("{:?}\n\nContinue? ", plan);
@@ -108,15 +113,16 @@ async fn apply(approve: bool) -> io::Result<ExitCode> {
 
             let (tx, mut rx) = async_std::channel::unbounded();
 
-            async_std::task::spawn(async move {
+            let join = async_std::task::spawn(async move {
                 while let Some(event) = rx.next().await {
                     println!("{:?}", event);
                 }
             });
 
             plan = plan.execute(&program, &state, tx).await;
+
+            join.await;
         }
-        println!("{:?}", plan);
     }
 
     state.save(
