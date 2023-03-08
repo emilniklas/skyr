@@ -29,6 +29,7 @@ pub enum TokenKind<'a> {
 
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
+    Integer(i128),
 
     Unknown(char),
 }
@@ -83,6 +84,8 @@ impl<'a> Lexer<'a> {
 
             Some('"') => return self.string_literal(),
 
+            Some(c) if c >= '0' && c <= '9' => return self.integer_literal(),
+
             Some(c) if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' => {
                 return self.symbol_or_keyword()
             }
@@ -109,6 +112,23 @@ impl<'a> Lexer<'a> {
 
             None => TokenKind::Unknown('\0'),
         }
+    }
+
+    fn integer_literal(&mut self) -> TokenKind<'a> {
+        let mut len = 0;
+        let mut chars = self.code.chars();
+        while let Some(c) = chars.next() {
+            if c >= '0' && c <= '9' {
+                self.location.increment_character();
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        let integer = &self.code[..len];
+        self.code = &self.code[len..];
+
+        TokenKind::Integer(integer.parse().unwrap_or(i128::MAX))
     }
 
     fn symbol_or_keyword(&mut self) -> TokenKind<'a> {

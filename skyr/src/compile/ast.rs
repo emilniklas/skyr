@@ -42,6 +42,8 @@ pub trait Visitor<'a> {
 
     fn visit_string_literal(&mut self, string_literal: &'a StringLiteral) {}
 
+    fn visit_integer_literal(&mut self, integer_literal: &'a IntegerLiteral) {}
+
     fn enter_member_access(&mut self, member_access: &'a MemberAccess) {}
     fn leave_member_access(&mut self, member_access: &'a MemberAccess) {}
 
@@ -272,6 +274,7 @@ impl Parser for Statement {
 #[derive(Debug)]
 pub enum Expression {
     StringLiteral(StringLiteral),
+    IntegerLiteral(IntegerLiteral),
     Identifier(Identifier),
     Construct(Box<Construct>),
     Record(Record<Expression>),
@@ -285,6 +288,7 @@ impl Visitable for Expression {
         visitor.enter_expression(self);
         match self {
             Expression::StringLiteral(n) => n.visit(visitor),
+            Expression::IntegerLiteral(n) => n.visit(visitor),
             Expression::Identifier(n) => n.visit(visitor),
             Expression::Construct(n) => n.visit(visitor),
             Expression::Record(n) => n.visit(visitor),
@@ -300,6 +304,7 @@ impl HasSpan for Expression {
     fn span(&self) -> Span {
         match self {
             Expression::StringLiteral(n) => n.span.clone(),
+            Expression::IntegerLiteral(n) => n.span.clone(),
             Expression::Construct(n) => n.span.clone(),
             Expression::Identifier(n) => n.span.clone(),
             Expression::Record(n) => n.span.clone(),
@@ -323,6 +328,14 @@ impl Parser for LeafExpression {
             }) => {
                 let (literal, tokens) = StringLiteral::parse(tokens)?;
                 Ok((Expression::StringLiteral(literal), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::Integer(_),
+                ..
+            }) => {
+                let (literal, tokens) = IntegerLiteral::parse(tokens)?;
+                Ok((Expression::IntegerLiteral(literal), tokens))
             }
 
             Some(Token {
@@ -442,6 +455,43 @@ impl Parser for Expression {
 
                 _ => return Ok((expression, tokens)),
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct IntegerLiteral {
+    pub span: Span,
+    pub value: i128,
+}
+
+impl Visitable for IntegerLiteral {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.visit_integer_literal(self);
+    }
+}
+
+impl Parser for IntegerLiteral {
+    type Output = Self;
+
+    fn parse<'a>(tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        match tokens.get(0) {
+            Some(Token {
+                span,
+                kind: TokenKind::Integer(value),
+            }) => {
+                return Ok((
+                    IntegerLiteral {
+                        span: span.clone(),
+                        value: *value,
+                    },
+                    &tokens[1..],
+                ));
+            }
+            t => Err(ParseError::Expected(
+                "integer literal",
+                t.map(|t| t.span.clone()),
+            )),
         }
     }
 }

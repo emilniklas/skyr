@@ -83,6 +83,6 @@ impl<'a> AnalyzedProgram<'a> {
         for module in self.modules {
             executor.execute_module(ctx.clone(), module).await;
         }
-        executor.finalize()
+        executor.finalize(state)
     }
 }

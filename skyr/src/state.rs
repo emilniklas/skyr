@@ -1,17 +1,30 @@
-use std::collections::BTreeMap;
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
+use std::{fmt, io};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum ResourceId {
-    Named(String),
+use crate::analyze::Type;
+use crate::execute::Value;
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResourceId {
+    type_: Type,
+    id: String,
 }
 
-impl From<&str> for ResourceId {
-    fn from(value: &str) -> Self {
-        ResourceId::Named(value.into())
+impl fmt::Debug for ResourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}({})", self.type_, self.id)
+    }
+}
+
+impl ResourceId {
+    pub fn new(type_: impl Into<Type>, id: impl Into<String>) -> ResourceId {
+        ResourceId {
+            type_: type_.into(),
+            id: id.into(),
+        }
     }
 }
 
@@ -46,17 +59,35 @@ impl State {
             .unwrap()
             .insert(resource.id.clone(), resource);
     }
+
+    pub fn remove(&self, id: &ResourceId) -> Option<Resource> {
+        self.resources.write().unwrap().remove(id)
+    }
+
+    pub fn all_not_in(&self, ids: &BTreeSet<ResourceId>) -> Vec<Resource> {
+        self.resources
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| !ids.contains(id))
+            .map(|(_, r)| r)
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Resource {
     pub id: ResourceId,
+    pub arg: ResourceValue,
     pub state: ResourceValue,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ResourceValue {
+    Nil,
     String(String),
+    Integer(i128),
     Record(Vec<(String, ResourceValue)>),
 }
 
@@ -65,6 +96,20 @@ impl ResourceValue {
         i: impl IntoIterator<Item = (impl Into<String>, impl Into<ResourceValue>)>,
     ) -> Self {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t.into())).collect())
+    }
+
+    pub fn set_member(&mut self, name: &str, value: impl Into<ResourceValue>) {
+        if let ResourceValue::Record(r) = self {
+            for (n, v) in r.iter_mut() {
+                if n == name {
+                    *v = value.into();
+                    return;
+                }
+            }
+            r.push((name.into(), value.into()));
+        } else {
+            panic!("cannot set {} on {:?}", name, self);
+        }
     }
 }
 
@@ -77,5 +122,25 @@ impl From<&str> for ResourceValue {
 impl From<String> for ResourceValue {
     fn from(value: String) -> Self {
         ResourceValue::String(value.into())
+    }
+}
+
+impl From<i128> for ResourceValue {
+    fn from(value: i128) -> Self {
+        ResourceValue::Integer(value)
+    }
+}
+
+impl From<Value<'_>> for ResourceValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Nil => ResourceValue::Nil,
+            Value::String(s) => ResourceValue::String(s),
+            Value::Integer(i) => ResourceValue::Integer(i),
+            Value::Record(r) => {
+                ResourceValue::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
+            }
+            _ => panic!("cannot derive a resource value from {:?}", value),
+        }
     }
 }

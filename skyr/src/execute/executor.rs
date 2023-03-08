@@ -1,8 +1,9 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_std::sync::RwLock;
@@ -64,7 +65,9 @@ impl<'a> ExecutionContext<'a> {
 
 #[derive(Default)]
 pub struct Executor<'a> {
-    pub plan: RwLock<Plan<'a>>,
+    plan: RwLock<Plan<'a>>,
+    used_resources: RwLock<BTreeSet<ResourceId>>,
+    is_pending: AtomicBool,
 }
 
 impl<'a> Executor<'a> {
@@ -72,8 +75,18 @@ impl<'a> Executor<'a> {
         Executor::default()
     }
 
-    pub fn finalize(self) -> Plan<'a> {
-        self.plan.into_inner()
+    pub fn finalize(self, state: &'a State) -> Plan<'a> {
+        let mut plan = self.plan.into_inner();
+
+        if !self.is_pending.into_inner() {
+            let used = self.used_resources.into_inner();
+
+            for resource in state.all_not_in(&used) {
+                plan.register_delete(resource.id, |_, _| Box::pin(async {}));
+            }
+        }
+
+        plan
     }
 
     pub fn execute_module(
@@ -132,8 +145,9 @@ impl<'a> Executor<'a> {
             let debug = debug.clone();
             Box::pin(async move {
                 let v = exp.resolve(e).await;
-                if let Some(span) = debug {
-                    println!("{:?} -> {:#?}", span, v);
+                if let Value::Pending(_) = v {
+                } else if let Some(span) = debug {
+                    e.plan.write().await.register_debug(span, v);
                 }
                 Value::Nil
             })
@@ -190,6 +204,7 @@ impl<'a> Executor<'a> {
             Box::pin(async move {
                 match expression {
                     Expression::StringLiteral(s) => Value::String(s.value.clone()),
+                    Expression::IntegerLiteral(i) => Value::Integer(i.value),
                     Expression::Identifier(id) => {
                         let binding_id =
                             ctx.table.declaration(id).expect("undefined reference").id();
@@ -204,6 +219,7 @@ impl<'a> Executor<'a> {
                             .await;
 
                         if let Value::Pending(deps) = callee {
+                            executor.is_pending.fetch_or(true, Ordering::SeqCst);
                             return Value::Pending(deps);
                         }
 
@@ -226,10 +242,11 @@ impl<'a> Executor<'a> {
                             .await;
 
                         if let Value::Pending(deps) = subject {
+                            executor.is_pending.fetch_or(true, Ordering::SeqCst);
                             return Value::Pending(deps);
                         }
 
-                        subject.access_member(ma.identifier.symbol.as_str())
+                        subject.access_member(ma.identifier.symbol.as_str()).clone()
                     }
                     Expression::Construct(construct) => {
                         let subject = executor
@@ -238,6 +255,7 @@ impl<'a> Executor<'a> {
                             .await;
 
                         if let Value::Pending(deps) = subject {
+                            executor.is_pending.fetch_or(true, Ordering::SeqCst);
                             return Value::Pending(deps);
                         }
 
@@ -290,6 +308,7 @@ impl<'a> Executor<'a> {
 pub enum Value<'a> {
     Nil,
     String(String),
+    Integer(i128),
     Deferred(Deferred<'a>),
     Record(Vec<(String, Value<'a>)>),
     Function(
@@ -339,6 +358,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 },
             },
             Value::String(s) => fmt::Debug::fmt(s, f),
+            Value::Integer(i) => fmt::Debug::fmt(i, f),
             Value::Nil => write!(f, "<nil>"),
             Value::Record(fields) => {
                 let mut s = f.debug_map();
@@ -362,7 +382,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
 impl<'a> Value<'a> {
     pub fn dependencies(&self) -> Vec<ResourceId> {
         match self {
-            Value::Nil | Value::String(_) => vec![],
+            Value::Nil | Value::String(_) | Value::Integer(_) => vec![],
             Value::Deferred(_) => panic!("cannot get dependencies from deferred"),
             Value::Record(r) => {
                 let mut result = vec![];
@@ -388,6 +408,16 @@ impl<'a> fmt::Debug for Value<'a> {
             arcs: &RefCell::new(vec![]),
         }
         .fmt(f)
+    }
+}
+
+impl<'a> fmt::Display for Value<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::String(s) => s.fmt(f),
+            Value::Integer(i) => i.fmt(f),
+            v => write!(f, "{:#?}", v),
+        }
     }
 }
 
@@ -427,7 +457,7 @@ impl<'a> Value<'a> {
                 return Box::pin(async move { Value::Pending(dependencies) });
             }
 
-            let id = r.id(&args[0]);
+            let id = r.resource_id(&args[0]);
             Box::pin(async move {
                 let r = r.clone();
                 match ctx.state.get(&id) {
@@ -439,6 +469,7 @@ impl<'a> Value<'a> {
                                 Box::pin(async move {
                                     Resource {
                                         id,
+                                        arg: arg.clone().into(),
                                         state: r.create(arg).await,
                                     }
                                 })
@@ -446,17 +477,43 @@ impl<'a> Value<'a> {
                         });
                         Value::Pending(vec![id])
                     }
-                    Some(resource) => resource.state.into(),
+                    Some(mut resource) => {
+                        resource.state = r.read(resource.state).await;
+
+                        executor
+                            .used_resources
+                            .write()
+                            .await
+                            .insert(resource.id.clone());
+
+                        if resource.arg != args[0].clone().into() {
+                            let mut plan = executor.plan.write().await;
+                            plan.register_update(id.clone(), args[0].clone(), {
+                                move |_id, new_arg| {
+                                    let mut resource = resource.clone();
+                                    let r = r.clone();
+                                    Box::pin(async move {
+                                        resource.arg = new_arg.clone().into();
+                                        resource.state = r.update(new_arg, resource.state).await;
+                                        resource
+                                    })
+                                }
+                            });
+                            return Value::Pending(vec![id]);
+                        }
+
+                        resource.state.into()
+                    }
                 }
             })
         }))
     }
 
-    pub fn access_member(&self, name: &str) -> Value<'a> {
+    pub fn access_member(&self, name: &str) -> &Value<'a> {
         if let Value::Record(r) = self {
             for (n, v) in r {
                 if name == *n {
-                    return v.clone();
+                    return v;
                 }
             }
             panic!("undefined field {}", name);
@@ -471,6 +528,18 @@ impl<'a> Value<'a> {
         } else {
             panic!("{:?} is not a string", self)
         }
+    }
+
+    pub fn as_i128(&self) -> i128 {
+        if let Value::Integer(i) = self {
+            *i
+        } else {
+            panic!("{:?} is not an integer", self)
+        }
+    }
+
+    pub fn as_usize(&self) -> usize {
+        self.as_i128() as usize
     }
 }
 
@@ -528,7 +597,9 @@ impl<T: fmt::Display> fmt::Debug for DisplayAsDebug<T> {
 impl<'a> From<ResourceValue> for Value<'a> {
     fn from(value: ResourceValue) -> Self {
         match value {
+            ResourceValue::Nil => Self::Nil,
             ResourceValue::String(s) => Self::String(s),
+            ResourceValue::Integer(i) => Self::Integer(i),
             ResourceValue::Record(r) => {
                 Self::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
             }

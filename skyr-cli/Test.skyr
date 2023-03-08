@@ -1,17 +1,18 @@
 import Random
 
-identifier = Random.Identifier {
-  name: "my-id"
+id1 = Random.Identifier {
+  name: "one"
+  byteLength: 4
 }
 
-identifier2 = Random.Identifier {
-  name: "my-id-2"
+id2 = Random.Identifier {
+  name: id1.hex
+  byteLength: 4
 }
 
-identifier3: String = Random.Identifier {
-  name: identifier.hex
+id3 = Random.Identifier {
+  name: id2.hex
+  byteLength: 4
 }
 
-debug identifier.hex
-debug identifier.name
-debug identifier2.hex
+debug id3.hex

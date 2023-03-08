@@ -4,6 +4,8 @@ use std::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
+use serde::{Serialize, Deserialize};
+
 use crate::compile::*;
 
 use super::{Declaration, External, ImportMap, SymbolTable};
@@ -63,6 +65,7 @@ impl<'a> TypeEnvironment<'a> {
         match (lhs, rhs) {
             (Type::Void, Type::Void) => Type::Void,
             (Type::String, Type::String) => Type::String,
+            (Type::Integer, Type::Integer) => Type::Integer,
             (Type::Function(lhs_a, lhs_r), Type::Function(rhs_a, rhs_r)) => {
                 let arity = lhs_a.len().min(rhs_a.len());
 
@@ -156,6 +159,7 @@ impl<'a> TypeEnvironment<'a> {
         match type_ {
             Type::Void => Type::Void,
             Type::String => Type::String,
+            Type::Integer => Type::Integer,
             Type::Open(id) if seen_ids.contains(&id) => Type::Open(id),
             Type::Open(id) => self
                 .bindings
@@ -307,6 +311,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
     pub fn check_expression(&mut self, expression: &'a Expression) -> Type {
         match expression {
             Expression::StringLiteral(_) => Type::String,
+            Expression::IntegerLiteral(_) => Type::Integer,
             Expression::Identifier(id) => self
                 .symbols
                 .declaration(id)
@@ -348,7 +353,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
 
         let mut env = TypeEnvironment::new(&mut self.errors);
 
-        env.unify(type_, callee_type, &construct.span);
+        env.unify(callee_type, type_, &construct.span);
 
         env.resolve(return_type)
     }
@@ -503,7 +508,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeId(u64);
 
 static ID_GEN: AtomicU64 = AtomicU64::new(0);
@@ -526,10 +531,11 @@ impl fmt::Debug for TypeId {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     Void,
     String,
+    Integer,
     Open(TypeId),
     Record(Vec<(String, Type)>),
     Named(String, Box<Type>),
@@ -562,6 +568,7 @@ impl Type {
         match self {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
+            Type::Integer => write!(f, "Integer"),
             Type::Record(fields) => {
                 let mut s = f.debug_map();
                 for field in fields {
