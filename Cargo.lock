@@ -487,6 +487,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79"
 
 [[package]]
+name = "libloading"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
+dependencies = [
+ "cfg-if",
+ "winapi",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -684,6 +694,16 @@ dependencies = [
  "clap",
  "futures",
  "glob",
+ "libloading",
+ "skyr",
+]
+
+[[package]]
+name = "skyr-random"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rand",
  "skyr",
 ]
 

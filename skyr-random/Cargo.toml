@@ -1,0 +1,15 @@
+[package]
+name = "skyr-random"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "std_skyr_random"
+crate_type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.66"
+rand = "0.8.5"
+skyr = { path = "../skyr" }

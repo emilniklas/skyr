@@ -2,6 +2,16 @@ use crate::analyze::Type;
 use crate::execute::{ExecutionContext, Value};
 use crate::{ResourceId, ResourceValue};
 
+#[macro_export]
+macro_rules! export_plugin {
+    ($plugin:tt) => {
+        #[no_mangle]
+        extern "C" fn hello() -> *mut dyn Plugin {
+            Box::into_raw(Box::new($plugin))
+        }
+    };
+}
+
 pub trait Plugin: Send + Sync {
     fn import_name(&self) -> &str;
     fn module_type(&self) -> Type;
@@ -11,10 +21,13 @@ pub trait Plugin: Send + Sync {
 #[async_trait::async_trait]
 pub trait PluginResource {
     fn resource_id<'a>(&self, arg: &Value<'a>) -> ResourceId {
-        ResourceId::new(match self.type_() {
-            Type::Function(_, r) => *r,
-            t => t,
-        }, self.id(arg))
+        ResourceId::new(
+            match self.type_() {
+                Type::Function(_, r) => *r,
+                t => t,
+            },
+            self.id(arg),
+        )
     }
 
     fn type_(&self) -> Type;

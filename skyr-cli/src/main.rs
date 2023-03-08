@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use async_std::stream::StreamExt;
 use clap::Parser;
 use glob;
-use skyr::{stdlib, Plugin, Source, State};
+use skyr::{Plugin, Source, State};
 
 #[derive(Parser)]
 struct SkyrCli {
@@ -25,9 +25,23 @@ enum Command {
 async fn main() -> io::Result<ExitCode> {
     let SkyrCli { command } = Parser::parse();
 
+    let plugins = unsafe {
+        glob::glob("**/libstd_skyr_*.dylib")
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .into_iter()
+            .filter_map(|d| d.ok())
+            .map(|dylib| {
+                let lib = libloading::Library::new(dylib).unwrap();
+                let func: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> =
+                    lib.get(b"hello").unwrap();
+                Box::from_raw(func())
+            })
+            .collect()
+    };
+
     match command {
-        Command::Apply { approve } => apply(approve).await,
-        Command::Plan => plan().await,
+        Command::Apply { approve } => apply(approve, plugins).await,
+        Command::Plan => plan(plugins).await,
     }
 }
 
@@ -53,10 +67,8 @@ async fn state() -> State {
         .unwrap_or_default()
 }
 
-async fn plan() -> io::Result<ExitCode> {
+async fn plan(plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
-
-    let plugins: Vec<Box<dyn Plugin>> = vec![Box::new(stdlib::Random)];
 
     let program = skyr::Program::new(sources?)
         .compile(plugins)
@@ -75,10 +87,8 @@ async fn plan() -> io::Result<ExitCode> {
     }
 }
 
-async fn apply(approve: bool) -> io::Result<ExitCode> {
+async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
-
-    let plugins: Vec<Box<dyn Plugin>> = vec![Box::new(stdlib::Random)];
 
     let program = skyr::Program::new(sources?)
         .compile(plugins)

@@ -1,10 +1,12 @@
-use std::time::Duration;
+use skyr::export_plugin;
 
-use rand::{Rng, RngCore};
+export_plugin!(Random);
 
-use crate::analyze::Type;
-use crate::execute::{ExecutionContext, Value};
-use crate::{Plugin, PluginResource, ResourceValue};
+use rand::RngCore;
+
+use skyr::analyze::Type;
+use skyr::execute::{ExecutionContext, Value};
+use skyr::{Plugin, PluginResource, ResourceValue};
 
 pub struct Random;
 
@@ -51,9 +53,6 @@ impl PluginResource for Identifier {
     }
 
     async fn update<'a>(&self, arg: Value<'a>, mut prev: ResourceValue) -> ResourceValue {
-        let secs = rand::thread_rng().gen_range(2..10);
-        async_std::task::sleep(Duration::from_secs(secs)).await;
-
         let mut v = vec![0u8; arg.access_member("byteLength").as_usize()];
         rand::thread_rng().fill_bytes(&mut v);
         prev.set_member(
@@ -63,10 +62,5 @@ impl PluginResource for Identifier {
                 .collect::<String>(),
         );
         prev
-    }
-
-    async fn delete<'a>(&self, _prev: ResourceValue) {
-        let secs = rand::thread_rng().gen_range(2..10);
-        async_std::task::sleep(Duration::from_secs(secs)).await;
     }
 }
