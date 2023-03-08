@@ -2,6 +2,7 @@ use std::io::{self, BufRead, Write};
 
 use clap::Parser;
 use glob;
+use skyr::{stdlib, Plugin};
 
 #[derive(Parser)]
 struct SkyrCli {
@@ -40,8 +41,10 @@ async fn apply() -> io::Result<()> {
 
     let sources = sources.into_iter().collect::<Result<Vec<_>, io::Error>>()?;
 
+    let plugins: Vec<Box<dyn Plugin>> = vec![Box::new(stdlib::Random)];
+
     let program = skyr::Program::new(sources)
-        .compile()
+        .compile(plugins)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let program = program
         .analyze()

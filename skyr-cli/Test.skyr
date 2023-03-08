@@ -1,3 +1,17 @@
-import Other
+import Random
 
-debug Other.o
+identifier = Random.Identifier {
+  name: "my-id"
+}
+
+identifier2 = Random.Identifier {
+  name: "my-id-2"
+}
+
+identifier3: String = Random.Identifier {
+  name: identifier.hex
+}
+
+debug identifier.hex
+debug identifier.name
+debug identifier2.hex

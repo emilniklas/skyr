@@ -1,7 +1,7 @@
 use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
-use crate::{Plan, Source, State};
+use crate::{Plan, Plugin, Source, State};
 
 pub struct Program {
     sources: Vec<Source>,
@@ -12,7 +12,7 @@ impl Program {
         Self { sources }
     }
 
-    pub fn compile(&self) -> Result<ParsedProgram, CompileError> {
+    pub fn compile(&self, plugins: Vec<Box<dyn Plugin>>) -> Result<ParsedProgram, CompileError> {
         let mut error = None;
         let mut modules = vec![];
         for source in &self.sources {
@@ -26,13 +26,14 @@ impl Program {
         if let Some(error) = error {
             Err(error)
         } else {
-            Ok(ParsedProgram { modules })
+            Ok(ParsedProgram { modules, plugins })
         }
     }
 }
 
 pub struct ParsedProgram {
     modules: Vec<Module>,
+    plugins: Vec<Box<dyn Plugin>>,
 }
 
 impl ParsedProgram {
@@ -45,7 +46,7 @@ impl ParsedProgram {
         }
         let mut table = collector.finalize(&mut error);
 
-        let import_map = ImportMap::new(self.modules.as_slice());
+        let import_map = ImportMap::new(self.modules.as_slice(), self.plugins.as_slice());
         let mut checker = TypeChecker::new(&mut table, import_map.clone());
         for module in self.modules.iter() {
             checker.check_module(module);

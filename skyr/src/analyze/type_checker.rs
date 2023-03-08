@@ -90,25 +90,25 @@ impl<'a> TypeEnvironment<'a> {
 
                 Type::Function(params, Box::new(return_type))
             }
-            (Type::Named(lhs, n), rhs) => Type::Named(
+            (Type::Named(n, lhs), rhs) => Type::Named(
+                n.clone(),
                 Box::new(self.do_unify(
                     *lhs,
-                    &|l| Type::Named(Box::new(lhs_wrap(l)), n.clone()),
+                    &|l| Type::Named(n.clone(), Box::new(lhs_wrap(l))),
                     rhs,
                     rhs_wrap,
                     span,
                 )),
-                n,
             ),
-            (lhs, Type::Named(rhs, n)) => Type::Named(
+            (lhs, Type::Named(n, rhs)) => Type::Named(
+                n.clone(),
                 Box::new(self.do_unify(
                     lhs,
                     lhs_wrap,
                     *rhs,
-                    &|r| Type::Named(Box::new(rhs_wrap(r)), n.clone()),
+                    &|r| Type::Named(n.clone(), Box::new(rhs_wrap(r))),
                     span,
                 )),
-                n,
             ),
             (Type::Record(lhf), Type::Record(rhf)) => {
                 let mut result = vec![];
@@ -130,11 +130,11 @@ impl<'a> TypeEnvironment<'a> {
                 self.resolve(Type::Record(result))
             }
             (Type::Open(lhs), rhs) => {
-                self.bindings.insert(lhs, rhs.clone());
+                self.bindings.insert(lhs, rhs_wrap(rhs.clone()));
                 rhs
             }
             (lhs, Type::Open(rhs)) => {
-                self.bindings.insert(rhs, lhs.clone());
+                self.bindings.insert(rhs, lhs_wrap(lhs.clone()));
                 lhs
             }
             (lhs, rhs) => {
@@ -173,7 +173,7 @@ impl<'a> TypeEnvironment<'a> {
                     .map(|(n, t)| (n, self.do_resolve(t, seen_ids.clone())))
                     .collect(),
             ),
-            Type::Named(t, n) => Type::Named(Box::new(self.do_resolve(*t, seen_ids)), n),
+            Type::Named(n, t) => Type::Named(n, Box::new(self.do_resolve(*t, seen_ids))),
             Type::Function(p, r) => Type::Function(
                 p.into_iter()
                     .map(|p| self.do_resolve(p, seen_ids.clone()))
@@ -264,6 +264,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             .resolve(import)
             .map(|i| match i {
                 External::Module(m) => self.check_module(m),
+                External::Plugin(p) => p.module_type(),
             })
             .unwrap_or_else(|| {
                 self.errors.push(TypeError::UnresolvedImport {
@@ -290,7 +291,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         self.checking.insert(typedef.id, vec![]);
 
         let type_ = self.check_type_expression(&typedef.type_);
-        let type_ = Type::Named(Box::new(type_), typedef.identifier.symbol.to_string());
+        let type_ = Type::Named(typedef.identifier.symbol.to_string(), Box::new(type_));
 
         let mut env = TypeEnvironment::new(&mut self.errors);
 
@@ -412,7 +413,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             TypeExpression::Identifier(id) => self
                 .symbols
                 .declaration(id)
-                .map(|d| Type::Named(Box::new(self.check_declaration(d)), id.symbol.clone()))
+                .map(|d| Type::Named(id.symbol.clone(), Box::new(self.check_declaration(d))))
                 .or_else(|| match id.symbol.as_str() {
                     "Void" => Some(Type::Void),
                     "String" => Some(Type::String),
@@ -531,7 +532,7 @@ pub enum Type {
     String,
     Open(TypeId),
     Record(Vec<(String, Type)>),
-    Named(Box<Type>, String),
+    Named(String, Box<Type>),
     Function(Vec<Type>, Box<Type>),
 }
 
@@ -543,6 +544,18 @@ impl Type {
 
     pub fn open() -> Self {
         Self::Open(Default::default())
+    }
+
+    pub fn named(n: impl Into<String>, t: Type) -> Self {
+        Self::Named(n.into(), Box::new(t))
+    }
+
+    pub fn function(a: impl IntoIterator<Item = Type>, r: Type) -> Self {
+        Type::Function(a.into_iter().collect(), Box::new(r))
+    }
+
+    pub fn record(i: impl IntoIterator<Item = (impl Into<String>, Type)>) -> Self {
+        Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
     }
 
     fn pretty_fmt(&self, f: &mut fmt::Formatter, open_types: &mut Vec<TypeId>) -> fmt::Result {
@@ -571,7 +584,7 @@ impl Type {
                 let ch = Self::TYPE_VAR_CHARS[idx];
                 write!(f, "{}", ch)
             }
-            Type::Named(_, n) => write!(f, "{}", n),
+            Type::Named(n, _) => write!(f, "{}", n),
             Type::Function(p, r) => {
                 let mut t = f.debug_tuple("");
                 for param in p {

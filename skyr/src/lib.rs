@@ -16,3 +16,5 @@ pub use plugin::*;
 pub mod compile;
 pub mod analyze;
 pub mod execute;
+
+pub mod stdlib;

@@ -10,14 +10,14 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
-use crate::Plan;
-use crate::State;
-use crate::{compile::*, ResourceId};
+use crate::{compile::*, Resource, ResourceId};
+use crate::{Plan, ResourceValue};
+use crate::{PluginResource, State};
 
 #[derive(Clone)]
 pub struct ExecutionContext<'a> {
     parent: Option<Box<ExecutionContext<'a>>>,
-    state: &'a State,
+    pub state: &'a State,
     table: &'a SymbolTable<'a>,
     bindings: Arc<RwLock<BTreeMap<NodeId, Value<'a>>>>,
     import_map: ImportMap<'a>,
@@ -64,7 +64,7 @@ impl<'a> ExecutionContext<'a> {
 
 #[derive(Default)]
 pub struct Executor<'a> {
-    plan: RwLock<Plan<'a>>,
+    pub plan: RwLock<Plan<'a>>,
 }
 
 impl<'a> Executor<'a> {
@@ -145,6 +145,7 @@ impl<'a> Executor<'a> {
 
         let value = match external {
             External::Module(m) => self.execute_module(ctx.new_empty(), m).await,
+            External::Plugin(p) => p.module_value(ctx.clone()),
         };
 
         ctx.bindings.write().await.insert(import.id, value.clone());
@@ -228,16 +229,7 @@ impl<'a> Executor<'a> {
                             return Value::Pending(deps);
                         }
 
-                        if let Value::Record(r) = subject {
-                            for (n, v) in &r {
-                                if ma.identifier.symbol == *n {
-                                    return v.clone();
-                                }
-                            }
-                            panic!("undefined field {}", &ma.identifier.symbol);
-                        } else {
-                            panic!("cannot access {} on {:?}", &ma.identifier.symbol, subject);
-                        }
+                        subject.access_member(ma.identifier.symbol.as_str())
                     }
                     Expression::Construct(construct) => {
                         let subject = executor
@@ -255,29 +247,7 @@ impl<'a> Executor<'a> {
                         } else {
                             panic!("cannot construct {:?}", subject);
                         }
-                    } /*
-                      Expression::Test(_) => Value::Function(Arc::new(move |executor, args| {
-                          let id = ResourceId::Named(format!("{:?}", args[0]));
-                          Box::pin(async move {
-                              match ctx.state.get(&id) {
-                                  None => {
-                                      let dependencies = args[0].dependencies();
-                                      if !dependencies.is_empty() {
-                                          return Value::Pending(dependencies);
-                                      }
-
-                                      let mut plan = executor.plan.write().await;
-                                      plan.register_create(id.clone(), args[0].clone());
-                                      Value::Pending(vec![id])
-                                  }
-                                  Some(_resource) => Value::Record(vec![(
-                                      "hello".into(),
-                                      Value::String("wow".into()),
-                                  )]),
-                              }
-                          })
-                      })),
-                      */
+                    }
                 }
             })
         })
@@ -325,6 +295,8 @@ pub enum Value<'a> {
     Function(
         Arc<
             dyn 'a
+                + Send
+                + Sync
                 + for<'e> Fn(
                     &'e Executor<'a>,
                     Vec<Value<'a>>,
@@ -403,6 +375,10 @@ impl<'a> Value<'a> {
             Value::Pending(ids) => ids.clone(),
         }
     }
+
+    pub fn record(i: impl IntoIterator<Item = (impl Into<String>, Value<'a>)>) -> Self {
+        Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
+    }
 }
 
 impl<'a> fmt::Debug for Value<'a> {
@@ -430,11 +406,71 @@ impl<'a> Value<'a> {
     }
 
     pub fn defer(
-        f: impl 'a + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>>,
+        f: impl 'a
+            + Send
+            + Sync
+            + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>>,
     ) -> Value<'a> {
         Value::Deferred(Deferred {
             inner: Arc::new(DeferredState::Deferred(Box::pin(f)).into()),
         })
+    }
+
+    pub fn resource(
+        ctx: ExecutionContext<'a>,
+        r: impl 'a + Clone + PluginResource + Send + Sync,
+    ) -> Value<'a> {
+        Value::Function(Arc::new(move |executor, args| {
+            let r = r.clone();
+            let dependencies = args[0].dependencies();
+            if !dependencies.is_empty() {
+                return Box::pin(async move { Value::Pending(dependencies) });
+            }
+
+            let id = r.id(&args[0]);
+            Box::pin(async move {
+                let r = r.clone();
+                match ctx.state.get(&id) {
+                    None => {
+                        let mut plan = executor.plan.write().await;
+                        plan.register_create(id.clone(), args[0].clone(), {
+                            move |id, arg| {
+                                let r = r.clone();
+                                Box::pin(async move {
+                                    Resource {
+                                        id,
+                                        state: r.create(arg).await,
+                                    }
+                                })
+                            }
+                        });
+                        Value::Pending(vec![id])
+                    }
+                    Some(resource) => resource.state.into(),
+                }
+            })
+        }))
+    }
+
+    pub fn access_member(&self, name: &str) -> Value<'a> {
+        if let Value::Record(r) = self {
+            for (n, v) in r {
+                if name == *n {
+                    return v.clone();
+                }
+            }
+            panic!("undefined field {}", name);
+        } else {
+            panic!("cannot access {} on {:?}", name, self);
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        if let Value::String(s) = self {
+            &s
+        } else {
+            panic!("{:?} is not a string", self)
+        }
     }
 }
 
@@ -472,6 +508,8 @@ enum DeferredState<'a> {
         Pin<
             Box<
                 dyn 'a
+                    + Send
+                    + Sync
                     + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>>,
             >,
         >,
@@ -484,5 +522,16 @@ struct DisplayAsDebug<T>(T);
 impl<T: fmt::Display> fmt::Debug for DisplayAsDebug<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl<'a> From<ResourceValue> for Value<'a> {
+    fn from(value: ResourceValue) -> Self {
+        match value {
+            ResourceValue::String(s) => Self::String(s),
+            ResourceValue::Record(r) => {
+                Self::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
+            }
+        }
     }
 }

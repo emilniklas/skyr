@@ -9,6 +9,12 @@ pub enum ResourceId {
     Named(String),
 }
 
+impl From<&str> for ResourceId {
+    fn from(value: &str) -> Self {
+        ResourceId::Named(value.into())
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct State {
     resources: RwLock<BTreeMap<ResourceId, Resource>>,
@@ -35,11 +41,41 @@ impl State {
     }
 
     pub fn insert(&self, resource: Resource) {
-        self.resources.write().unwrap().insert(resource.id.clone(), resource);
+        self.resources
+            .write()
+            .unwrap()
+            .insert(resource.id.clone(), resource);
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Resource {
     pub id: ResourceId,
+    pub state: ResourceValue,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ResourceValue {
+    String(String),
+    Record(Vec<(String, ResourceValue)>),
+}
+
+impl ResourceValue {
+    pub fn record(
+        i: impl IntoIterator<Item = (impl Into<String>, impl Into<ResourceValue>)>,
+    ) -> Self {
+        Self::Record(i.into_iter().map(|(n, t)| (n.into(), t.into())).collect())
+    }
+}
+
+impl From<&str> for ResourceValue {
+    fn from(value: &str) -> Self {
+        ResourceValue::String(value.into())
+    }
+}
+
+impl From<String> for ResourceValue {
+    fn from(value: String) -> Self {
+        ResourceValue::String(value.into())
+    }
 }
