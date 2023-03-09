@@ -1129,7 +1129,26 @@ impl Parser for Function {
             return_type = Some(t);
         }
 
-        let (body, tokens) = Block::parse(tokens)?;
+        let (body, tokens) = if let Some(Token {
+            kind: TokenKind::FatArrow,
+            span,
+        }) = tokens.get(0)
+        {
+            let (expression, tokens) = Expression::parse(&tokens[1..])?;
+
+            (
+                Block {
+                    span: span.start..expression.span().end,
+                    statements: vec![Statement::Return(Return {
+                        span: expression.span(),
+                        expression,
+                    })],
+                },
+                tokens,
+            )
+        } else {
+            Block::parse(tokens)?
+        };
 
         Ok((
             Function {

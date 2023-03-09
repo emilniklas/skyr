@@ -20,6 +20,7 @@ pub enum TokenKind<'a> {
     CloseSquare,
 
     Arrow,
+    FatArrow,
     Colon,
     Comma,
     Period,
@@ -100,6 +101,13 @@ impl<'a> Lexer<'a> {
                 self.location.increment_character();
                 self.code = &self.code[2..];
                 return TokenKind::Arrow;
+            }
+
+            Some('=') if chars.next() == Some('>') => {
+                self.location.increment_character();
+                self.location.increment_character();
+                self.code = &self.code[2..];
+                return TokenKind::FatArrow;
             }
 
             Some('<') if chars.next() == Some('=') => {
