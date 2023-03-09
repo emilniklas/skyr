@@ -12,6 +12,16 @@ macro_rules! export_plugin {
     };
 }
 
+#[macro_export]
+macro_rules! known {
+    ($value:expr) => {{
+        match $value {
+            p @ Value::Pending(_) => return p.clone(),
+            v => v,
+        }
+    }};
+}
+
 pub trait Plugin: Send + Sync {
     fn import_name(&self) -> &str;
     fn module_type(&self) -> Type;

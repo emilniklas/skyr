@@ -844,6 +844,7 @@ impl<'a> From<ResourceValue> for Value<'a> {
             ResourceValue::Record(r) => {
                 Self::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
             }
+            ResourceValue::List(l) => Self::List(l.into_iter().map(|e| e.into()).collect()),
         }
     }
 }

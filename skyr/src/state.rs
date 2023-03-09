@@ -90,6 +90,7 @@ pub enum ResourceValue {
     Integer(i128),
     Boolean(bool),
     Record(Vec<(String, ResourceValue)>),
+    List(Vec<ResourceValue>),
 }
 
 impl ResourceValue {
@@ -97,6 +98,12 @@ impl ResourceValue {
         i: impl IntoIterator<Item = (impl Into<String>, impl Into<ResourceValue>)>,
     ) -> Self {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t.into())).collect())
+    }
+
+    pub fn list(
+        i: impl IntoIterator<Item = impl Into<ResourceValue>>,
+    ) -> Self {
+        Self::List(i.into_iter().map(|e| e.into()).collect())
     }
 
     pub fn set_member(&mut self, name: &str, value: impl Into<ResourceValue>) {
@@ -132,6 +139,12 @@ impl From<i128> for ResourceValue {
     }
 }
 
+impl From<u8> for ResourceValue {
+    fn from(value: u8) -> Self {
+        ResourceValue::Integer(value.into())
+    }
+}
+
 impl From<Value<'_>> for ResourceValue {
     fn from(value: Value) -> Self {
         match value {
@@ -142,6 +155,7 @@ impl From<Value<'_>> for ResourceValue {
             Value::Record(r) => {
                 ResourceValue::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
             }
+            Value::List(l) => ResourceValue::List(l.into_iter().map(|e| e.into()).collect()),
             _ => panic!("cannot derive a resource value from {:?}", value),
         }
     }

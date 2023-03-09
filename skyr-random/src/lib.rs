@@ -37,7 +37,11 @@ impl PluginResource for Identifier {
             ])],
             Type::named(
                 "Random.Identifier",
-                Type::record([("name", Type::String), ("hex", Type::String)]),
+                Type::record([
+                    ("name", Type::String),
+                    ("hex", Type::String),
+                    ("bytes", Type::list(Type::Integer)),
+                ]),
             ),
         )
     }
@@ -57,10 +61,11 @@ impl PluginResource for Identifier {
         rand::thread_rng().fill_bytes(&mut v);
         prev.set_member(
             "hex",
-            v.into_iter()
+            v.iter()
                 .map(|c| format!("{:x}", c))
                 .collect::<String>(),
         );
+        prev.set_member("bytes", ResourceValue::list(v));
         prev
     }
 }

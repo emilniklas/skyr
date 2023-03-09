@@ -1,6 +1,6 @@
-use futures::StreamExt;
 use futures::stream::FuturesOrdered;
-use skyr::export_plugin;
+use futures::StreamExt;
+use skyr::{export_plugin, known};
 
 export_plugin!(List);
 
@@ -48,8 +48,9 @@ impl Plugin for List {
                 "map",
                 Value::function_async(|e, args| {
                     Box::pin(async move {
-                        let list = args[0].as_vec();
-                        let f = args[1].as_func();
+                        let list = known!(&args[0]).as_vec();
+                        let f = known!(&args[1]).as_func();
+
                         let mut fo = FuturesOrdered::new();
                         for element in list {
                             fo.push_back(f(e, vec![element.clone()]));
