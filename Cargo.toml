@@ -2,5 +2,6 @@
 members = [
   "skyr",
   "skyr-cli",
+  "skyr-list",
   "skyr-random",
 ]

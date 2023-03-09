@@ -698,6 +698,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyr-list"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "skyr",
+]
+
+[[package]]
 name = "skyr-random"
 version = "0.1.0"
 dependencies = [

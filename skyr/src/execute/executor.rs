@@ -147,9 +147,10 @@ impl<'a> Executor<'a> {
             let debug = debug.clone();
             Box::pin(async move {
                 let v = exp.resolve(e).await;
-                if let Value::Pending(_) = v {
-                } else if let Some(span) = debug {
-                    e.plan.write().await.register_debug(span, v);
+                if let Some(span) = debug {
+                    if !v.is_pending() {
+                        e.plan.write().await.register_debug(span, v);
+                    }
                 }
                 Value::Nil
             })
@@ -392,16 +393,12 @@ impl<'a> Executor<'a> {
                                 Value::Integer(rhs),
                             ) => Value::Integer(lhs / rhs),
 
-                            (
-                                Value::Boolean(lhs),
-                                BinaryOperatorKind::And,
-                                Value::Boolean(rhs),
-                            ) => Value::Boolean(lhs && rhs),
-                            (
-                                Value::Boolean(lhs),
-                                BinaryOperatorKind::Or,
-                                Value::Boolean(rhs),
-                            ) => Value::Boolean(lhs || rhs),
+                            (Value::Boolean(lhs), BinaryOperatorKind::And, Value::Boolean(rhs)) => {
+                                Value::Boolean(lhs && rhs)
+                            }
+                            (Value::Boolean(lhs), BinaryOperatorKind::Or, Value::Boolean(rhs)) => {
+                                Value::Boolean(lhs || rhs)
+                            }
 
                             (
                                 Value::String(lhs),
@@ -419,6 +416,13 @@ impl<'a> Executor<'a> {
                             }
                         }
                     }
+
+                    Expression::List(list) => Value::List(
+                        list.elements
+                            .iter()
+                            .map(|e| executor.execute_expression(ctx.clone(), e))
+                            .collect(),
+                    ),
                 }
             })
         })
@@ -462,6 +466,7 @@ pub enum Value<'a> {
         >,
     ),
     Pending(Vec<ResourceId>),
+    List(Vec<Value<'a>>),
 }
 
 struct TrackedFmtValue<'v, 'a> {
@@ -513,6 +518,16 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 }
                 s.finish()
             }
+            Value::List(elements) => {
+                let mut l = f.debug_list();
+                for value in elements.iter() {
+                    l.entry(&TrackedFmtValue {
+                        value,
+                        arcs: self.arcs,
+                    });
+                }
+                l.finish()
+            }
             Value::Function(_) => write!(f, "<fn>"),
             Value::Pending(_) => write!(f, "<pending>"),
         }
@@ -531,13 +546,52 @@ impl<'a> Value<'a> {
                 }
                 result
             }
+            Value::List(l) => {
+                let mut result = vec![];
+                for v in l {
+                    result.extend(v.dependencies());
+                }
+                result
+            }
             Value::Function(_) => todo!(),
             Value::Pending(ids) => ids.clone(),
         }
     }
 
+    pub fn is_pending(&self) -> bool {
+        match self {
+            Value::Nil | Value::String(_) | Value::Integer(_) | Value::Boolean(_) => false,
+
+            Value::Record(r) => r.iter().any(|(_, v)| v.is_pending()),
+            Value::List(l) => l.iter().any(|e| e.is_pending()),
+
+            Value::Function(_) => todo!(),
+
+            Value::Pending(_) | Value::Deferred(_) => true,
+        }
+    }
+
     pub fn record(i: impl IntoIterator<Item = (impl Into<String>, Value<'a>)>) -> Self {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
+    }
+
+    pub fn function_sync(
+        f: impl 'a + Copy + Send + Sync + for<'e> Fn(&'e Executor<'a>, Vec<Value<'a>>) -> Value<'a>,
+    ) -> Self {
+        Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a) })))
+    }
+
+    pub fn function_async(
+        f: impl 'a
+            + Copy
+            + Send
+            + Sync
+            + for<'e> Fn(
+                &'e Executor<'a>,
+                Vec<Value<'a>>,
+            ) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>>,
+    ) -> Self {
+        Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a).await })))
     }
 }
 
@@ -567,10 +621,27 @@ impl<'a> Value<'a> {
         executor: &'e Executor<'a>,
     ) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>> {
         Box::pin(async move {
-            if let Value::Deferred(d) = self {
-                d.resolve(executor).await
-            } else {
-                self
+            match self {
+                Value::Deferred(d) => d.resolve(executor).await,
+                Value::Record(r) => {
+                    let mut fo = FuturesOrdered::new();
+
+                    for (n, v) in r {
+                        fo.push_back(async move { (n, v.resolve(executor).await) })
+                    }
+
+                    Value::Record(fo.collect().await)
+                }
+                Value::List(l) => {
+                    let mut fo = FuturesOrdered::new();
+
+                    for v in l {
+                        fo.push_back(v.resolve(executor));
+                    }
+
+                    Value::List(fo.collect().await)
+                }
+                _ => self,
             }
         })
     }
@@ -675,6 +746,27 @@ impl<'a> Value<'a> {
             *b
         } else {
             panic!("{:?} is not a boolean", self)
+        }
+    }
+
+    pub fn as_vec(&self) -> &Vec<Value<'a>> {
+        if let Value::List(l) = self {
+            l
+        } else {
+            panic!("{:?} is not a list", self)
+        }
+    }
+
+    pub fn as_func(
+        &self,
+    ) -> &dyn for<'e> Fn(
+        &'e Executor<'a>,
+        Vec<Value<'a>>,
+    ) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>> {
+        if let Value::Function(f) = self {
+            f.as_ref()
+        } else {
+            panic!("{:?} is not a function", self)
         }
     }
 

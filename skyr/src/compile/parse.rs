@@ -16,6 +16,8 @@ pub enum TokenKind<'a> {
     CloseParen,
     OpenAngle,
     CloseAngle,
+    OpenSquare,
+    CloseSquare,
 
     Arrow,
     Colon,
@@ -145,12 +147,12 @@ impl<'a> Lexer<'a> {
         match c {
             Some('{') => TokenKind::OpenCurly,
             Some('}') => TokenKind::CloseCurly,
-
             Some('(') => TokenKind::OpenParen,
             Some(')') => TokenKind::CloseParen,
-
             Some('<') => TokenKind::OpenAngle,
             Some('>') => TokenKind::CloseAngle,
+            Some('[') => TokenKind::OpenSquare,
+            Some(']') => TokenKind::CloseSquare,
 
             Some(',') => TokenKind::Comma,
             Some(':') => TokenKind::Colon,

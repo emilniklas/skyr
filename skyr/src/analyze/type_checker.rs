@@ -67,6 +67,9 @@ impl<'a> TypeEnvironment<'a> {
             (Type::String, Type::String) => Type::String,
             (Type::Integer, Type::Integer) => Type::Integer,
             (Type::Boolean, Type::Boolean) => Type::Boolean,
+            (Type::List(lhs), Type::List(rhs)) => Type::List(Box::new(
+                self.do_unify(*lhs, lhs_wrap, *rhs, rhs_wrap, span),
+            )),
             (Type::Function(lhs_a, lhs_r), Type::Function(rhs_a, rhs_r)) => {
                 let arity = lhs_a.len().min(rhs_a.len());
 
@@ -162,6 +165,7 @@ impl<'a> TypeEnvironment<'a> {
             Type::String => Type::String,
             Type::Integer => Type::Integer,
             Type::Boolean => Type::Boolean,
+            Type::List(e) => Type::List(Box::new(self.do_resolve(*e, seen_ids))),
             Type::Open(id) if seen_ids.contains(&id) => Type::Open(id),
             Type::Open(id) => self
                 .bindings
@@ -346,7 +350,25 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Expression::Construct(c) => self.check_construct(c),
             Expression::MemberAccess(ma) => self.check_member_access(ma),
             Expression::BinaryOperation(op) => self.check_binary_operation(op),
+            Expression::List(list) => self.check_list(list),
         }
+    }
+
+    pub fn check_list(&mut self, list: &'a List) -> Type {
+        let mut list_type = Type::default();
+
+        let elements = list
+            .elements
+            .iter()
+            .map(|e| (e, self.check_expression(e)))
+            .collect::<Vec<_>>();
+
+        let mut env = TypeEnvironment::new(&mut self.errors);
+        for (node, element_type) in elements {
+            list_type = env.unify(list_type, element_type, &node.span());
+        }
+
+        Type::List(Box::new(env.resolve(list_type)))
     }
 
     pub fn check_binary_operation(&mut self, operation: &'a BinaryOperation) -> Type {
@@ -472,6 +494,9 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
                 .map(|d| Type::Named(id.symbol.clone(), Box::new(self.check_declaration(d))))
                 .unwrap_or_default(),
             TypeExpression::Record(r) => self.check_type_record(r),
+            TypeExpression::List(l) => {
+                Type::List(Box::new(self.check_type_expression(&l.element_type)))
+            }
         }
     }
 
@@ -591,6 +616,7 @@ pub enum Type {
     Record(Vec<(String, Type)>),
     Named(String, Box<Type>),
     Function(Vec<Type>, Box<Type>),
+    List(Box<Type>),
 }
 
 impl Type {
@@ -615,12 +641,21 @@ impl Type {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
     }
 
+    pub fn list(t: Type) -> Self {
+        Self::List(Box::new(t))
+    }
+
     fn pretty_fmt(&self, f: &mut fmt::Formatter, open_types: &mut Vec<TypeId>) -> fmt::Result {
         match self {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
             Type::Integer => write!(f, "Integer"),
             Type::Boolean => write!(f, "Boolean"),
+            Type::List(element) => {
+                let mut s = f.debug_list();
+                s.entry(&element);
+                s.finish()
+            }
             Type::Record(fields) => {
                 let mut s = f.debug_map();
                 for field in fields {

@@ -95,6 +95,12 @@ pub trait Visitor<'a> {
     fn leave_binary_operation(&mut self, binary_operation: &'a BinaryOperation) {}
 
     fn visit_binary_operator(&mut self, binary_operator: &'a BinaryOperator) {}
+
+    fn enter_list(&mut self, list: &'a List) {}
+    fn leave_list(&mut self, list: &'a List) {}
+
+    fn enter_list_type_expression(&mut self, type_: &'a ListTypeExpression) {}
+    fn leave_list_type_expression(&mut self, type_: &'a ListTypeExpression) {}
 }
 
 pub trait Visitable {
@@ -176,14 +182,14 @@ impl Visitable for Statement {
 impl HasSpan for Statement {
     fn span(&self) -> Span {
         match self {
-            Statement::Expression(e) => e.span(),
-            Statement::Assignment(a) => a.span.clone(),
-            Statement::TypeDefinition(a) => a.span.clone(),
-            Statement::Return(r) => r.span.clone(),
-            Statement::Debug(r) => r.span.clone(),
-            Statement::Import(r) => r.span.clone(),
-            Statement::If(r) => r.span.clone(),
-            Statement::Block(r) => r.span.clone(),
+            Statement::Expression(n) => n.span(),
+            Statement::Assignment(n) => n.span.clone(),
+            Statement::TypeDefinition(n) => n.span.clone(),
+            Statement::Return(n) => n.span.clone(),
+            Statement::Debug(n) => n.span.clone(),
+            Statement::Import(n) => n.span.clone(),
+            Statement::If(n) => n.span.clone(),
+            Statement::Block(n) => n.span.clone(),
         }
     }
 }
@@ -318,6 +324,7 @@ pub enum Expression {
     Function(Box<Function>),
     Call(Box<Call>),
     BinaryOperation(Box<BinaryOperation>),
+    List(List),
 }
 
 impl Visitable for Expression {
@@ -334,6 +341,7 @@ impl Visitable for Expression {
             Expression::Function(n) => n.visit(visitor),
             Expression::Call(n) => n.visit(visitor),
             Expression::BinaryOperation(n) => n.visit(visitor),
+            Expression::List(n) => n.visit(visitor),
         }
         visitor.leave_expression(self);
     }
@@ -352,6 +360,7 @@ impl HasSpan for Expression {
             Expression::Function(n) => n.span.clone(),
             Expression::Call(n) => n.span.clone(),
             Expression::BinaryOperation(n) => n.span.clone(),
+            Expression::List(n) => n.span.clone(),
         }
     }
 }
@@ -409,6 +418,33 @@ impl Parser for LeafExpression {
             }) => {
                 let (function, tokens) = Function::parse(tokens)?;
                 Ok((Expression::Function(Box::new(function)), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::OpenSquare,
+                ..
+            }) => {
+                let (list, tokens) = List::parse(tokens)?;
+                return Ok((Expression::List(list), tokens));
+            }
+
+            Some(Token {
+                kind: TokenKind::OpenParen,
+                ..
+            }) => {
+                let (expression, tokens) = Expression::parse(&tokens[1..])?;
+                if let Some(Token {
+                    kind: TokenKind::CloseCurly,
+                    ..
+                }) = tokens.get(0)
+                {
+                    return Ok((expression, &tokens[1..]));
+                } else {
+                    return Err(ParseError::Expected(
+                        "closing parenthesis",
+                        tokens.get(0).map(|t| t.span.clone()),
+                    ));
+                }
             }
 
             t => Err(ParseError::Expected(
@@ -940,6 +976,7 @@ impl Parser for TypeDefinition {
 pub enum TypeExpression {
     Identifier(Identifier),
     Record(Record<TypeExpression>),
+    List(Box<ListTypeExpression>),
 }
 
 impl Visitable for TypeExpression {
@@ -948,6 +985,7 @@ impl Visitable for TypeExpression {
         match self {
             TypeExpression::Identifier(id) => id.visit(visitor),
             TypeExpression::Record(r) => r.visit(visitor),
+            TypeExpression::List(l) => l.visit(visitor),
         }
         visitor.leave_type_expression(self);
     }
@@ -958,6 +996,7 @@ impl HasSpan for TypeExpression {
         match self {
             TypeExpression::Identifier(id) => id.span.clone(),
             TypeExpression::Record(r) => r.span.clone(),
+            TypeExpression::List(l) => l.span.clone(),
         }
     }
 }
@@ -981,6 +1020,14 @@ impl Parser for TypeExpression {
             }) => {
                 let (id, tokens) = Identifier::parse(tokens)?;
                 Ok((TypeExpression::Identifier(id), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::OpenSquare,
+                ..
+            }) => {
+                let (t, tokens) = ListTypeExpression::parse(tokens)?;
+                Ok((TypeExpression::List(Box::new(t)), tokens))
             }
 
             t => Err(ParseError::Expected(
@@ -1707,5 +1754,144 @@ impl Visitable for BinaryOperation {
         self.operator.visit(visitor);
         self.rhs.visit(visitor);
         visitor.leave_binary_operation(self);
+    }
+}
+
+#[derive(Debug)]
+pub struct List {
+    pub span: Span,
+    pub elements: Vec<Expression>,
+}
+
+impl Visitable for List {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_list(self);
+        for element in &self.elements {
+            element.visit(visitor);
+        }
+        visitor.leave_list(self);
+    }
+}
+
+impl Parser for List {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::OpenSquare,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            start = span.start;
+        } else {
+            return Err(ParseError::Expected(
+                "list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let mut elements = vec![];
+        while tokens
+            .get(0)
+            .map(|t| !matches!(t.kind, TokenKind::CloseSquare))
+            .unwrap_or(false)
+        {
+            let statement;
+            (statement, tokens) = Expression::parse(tokens)?;
+            elements.push(statement);
+
+            if let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = tokens.get(0)
+            {
+                tokens = &tokens[1..];
+            }
+        }
+
+        let end;
+        if let Some(Token {
+            kind: TokenKind::CloseSquare,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            end = span.end;
+        } else {
+            return Err(ParseError::Expected(
+                "end of list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        Ok((
+            List {
+                span: start..end,
+                elements,
+            },
+            tokens,
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ListTypeExpression {
+    pub span: Span,
+    pub element_type: TypeExpression,
+}
+
+impl Visitable for ListTypeExpression {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_list_type_expression(self);
+        self.element_type.visit(visitor);
+        visitor.leave_list_type_expression(self);
+    }
+}
+
+impl Parser for ListTypeExpression {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::OpenSquare,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            start = span.start;
+        } else {
+            return Err(ParseError::Expected(
+                "list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let (element_type, mut tokens) = TypeExpression::parse(tokens)?;
+
+        let end;
+        if let Some(Token {
+            kind: TokenKind::CloseSquare,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            end = span.end;
+        } else {
+            return Err(ParseError::Expected(
+                "end of list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        Ok((
+            ListTypeExpression {
+                span: start..end,
+                element_type,
+            },
+            tokens,
+        ))
     }
 }
