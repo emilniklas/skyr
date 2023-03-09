@@ -360,7 +360,16 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         type_ = env.unify(type_, lhs_type, &operation.span);
         type_ = env.unify(type_, rhs_type, &operation.span);
 
-        env.resolve(type_)
+        env.resolve(match &operation.operator.kind {
+            BinaryOperatorKind::LessThan
+            | BinaryOperatorKind::LessThanOrEqualTo
+            | BinaryOperatorKind::EqualTo
+            | BinaryOperatorKind::NotEqualTo
+            | BinaryOperatorKind::GreaterThanOrEqualTo
+            | BinaryOperatorKind::GreaterThan => Type::Boolean,
+
+            _ => type_,
+        })
     }
 
     pub fn check_member_access(&mut self, member_access: &'a MemberAccess) -> Type {

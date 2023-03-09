@@ -1,6 +1,6 @@
-use super::{BinaryOperator, Expression, BinaryOperation, HasSpan};
+use super::{BinaryOperation, BinaryOperator, Expression, HasSpan};
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ShuntingYard {
     operators: Vec<BinaryOperator>,
     output: Vec<Member>,
@@ -38,30 +38,29 @@ impl ShuntingYard {
             self.output.insert(0, Member::Operator(op));
         }
 
-        let mut lhs = match self.output.pop() {
-            None => panic!("empty expression"),
-            Some(Member::Operator(_)) => panic!("cannot start with operator"),
-            Some(Member::Expression(e)) => Some(e),
-        };
-        let mut rhs = None;
-
+        let mut result = vec![];
         while let Some(member) = self.output.pop() {
             match member {
-                Member::Expression(e) => rhs = Some(e),
-                Member::Operator(op) => {
-                    let ls = lhs.take().expect("sequence error");
-                    let rs = rhs.take().expect("sequence error");
-                    lhs = Some(Expression::BinaryOperation(Box::new(BinaryOperation {
-                        span: ls.span().start..rs.span().end,
-                        lhs: ls,
-                        operator: op,
-                        rhs: rs,
-                    })));
+                Member::Expression(e) => {
+                    result.push(e);
+                }
+
+                Member::Operator(operator) => {
+                    let rhs = result.pop().expect("sequence error");
+                    let lhs = result.pop().expect("sequence error");
+
+                    result.push(Expression::BinaryOperation(Box::new(BinaryOperation {
+                        span: lhs.span().start..rhs.span().end,
+                        lhs,
+                        operator,
+                        rhs,
+                    })))
                 }
             }
         }
 
-        lhs.unwrap()
+        assert!(result.len() == 1);
+        result.remove(0)
     }
 }
 

@@ -1483,6 +1483,14 @@ pub enum BinaryOperatorKind {
     GreaterThanOrEqualTo,
     GreaterThan,
     NotEqualTo,
+
+    Plus,
+    Minus,
+    Divide,
+    Multiply,
+
+    And,
+    Or,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -1505,6 +1513,13 @@ impl BinaryOperatorKind {
             }
 
             EqualTo | NotEqualTo => OperatorPrecedence::Equality,
+
+            Plus | Minus => OperatorPrecedence::Additive,
+
+            Multiply | Divide => OperatorPrecedence::Multiplicative,
+
+            And => OperatorPrecedence::And,
+            Or => OperatorPrecedence::Or,
         }
     }
 }
@@ -1593,6 +1608,72 @@ impl Parser for BinaryOperator {
                 BinaryOperator {
                     span: span.clone(),
                     kind: BinaryOperatorKind::NotEqualTo,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::Plus,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::Plus,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::Minus,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::Minus,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::Asterisk,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::Multiply,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::Slash,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::Divide,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::AndKeyword,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::And,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::OrKeyword,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::Or,
                 },
                 &tokens[1..],
             )),

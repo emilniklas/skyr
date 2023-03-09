@@ -371,6 +371,49 @@ impl<'a> Executor<'a> {
                                 Value::Integer(rhs),
                             ) => Value::Boolean(lhs > rhs),
 
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::Plus,
+                                Value::Integer(rhs),
+                            ) => Value::Integer(lhs + rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::Minus,
+                                Value::Integer(rhs),
+                            ) => Value::Integer(lhs - rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::Multiply,
+                                Value::Integer(rhs),
+                            ) => Value::Integer(lhs * rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::Divide,
+                                Value::Integer(rhs),
+                            ) => Value::Integer(lhs / rhs),
+
+                            (
+                                Value::Boolean(lhs),
+                                BinaryOperatorKind::And,
+                                Value::Boolean(rhs),
+                            ) => Value::Boolean(lhs && rhs),
+                            (
+                                Value::Boolean(lhs),
+                                BinaryOperatorKind::Or,
+                                Value::Boolean(rhs),
+                            ) => Value::Boolean(lhs || rhs),
+
+                            (
+                                Value::String(lhs),
+                                BinaryOperatorKind::EqualTo,
+                                Value::String(rhs),
+                            ) => Value::Boolean(lhs == rhs),
+                            (
+                                Value::String(lhs),
+                                BinaryOperatorKind::NotEqualTo,
+                                Value::String(rhs),
+                            ) => Value::Boolean(lhs != rhs),
+
                             (lhs, op, rhs) => {
                                 panic!("invalid operation: {:?} {:?} {:?}", lhs, op, rhs)
                             }

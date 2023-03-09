@@ -115,8 +115,6 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
                     exit_code = ExitCode::FAILURE;
                     break;
                 }
-            } else {
-                println!("{:?}", plan);
             }
 
             let (tx, mut rx) = async_std::channel::unbounded();

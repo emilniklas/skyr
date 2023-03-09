@@ -28,6 +28,11 @@ pub enum TokenKind<'a> {
     DoubleEqualSign,
     NotEqualSign,
 
+    Plus,
+    Minus,
+    Slash,
+    Asterisk,
+
     TypeKeyword,
     FnKeyword,
     ReturnKeyword,
@@ -37,6 +42,8 @@ pub enum TokenKind<'a> {
     FalseKeyword,
     IfKeyword,
     ElseKeyword,
+    AndKeyword,
+    OrKeyword,
 
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
@@ -150,6 +157,11 @@ impl<'a> Lexer<'a> {
             Some('.') => TokenKind::Period,
             Some('=') => TokenKind::EqualSign,
 
+            Some('+') => TokenKind::Plus,
+            Some('-') => TokenKind::Minus,
+            Some('/') => TokenKind::Slash,
+            Some('*') => TokenKind::Asterisk,
+
             Some(c) => TokenKind::Unknown(c),
 
             None => TokenKind::Unknown('\0'),
@@ -201,6 +213,8 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::FalseKeyword,
             "if" => TokenKind::IfKeyword,
             "else" => TokenKind::ElseKeyword,
+            "and" => TokenKind::AndKeyword,
+            "or" => TokenKind::OrKeyword,
             _ => TokenKind::Symbol(symbol),
         }
     }
