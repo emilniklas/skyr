@@ -23,6 +23,9 @@ impl Plugin for List {
                     let t = Type::open();
                     Type::function([Type::list(t.clone())], t)
                 }),
+                ("range", {
+                    Type::function([Type::Integer], Type::list(Type::Integer))
+                }),
                 ("map", {
                     let a = Type::open();
                     let b = Type::open();
@@ -40,8 +43,15 @@ impl Plugin for List {
             (
                 "first",
                 Value::function_sync(|_, args| {
-                    let list = args[0].as_vec();
+                    let list = known!(&args[0]).as_vec();
                     list.first().cloned().unwrap_or(Value::Nil)
+                }),
+            ),
+            (
+                "range",
+                Value::function_sync(|_, args| {
+                    let length = known!(&args[0]).as_usize();
+                    Value::List((0..length).map(|i| Value::Integer(i as i128)).collect())
                 }),
             ),
             (
