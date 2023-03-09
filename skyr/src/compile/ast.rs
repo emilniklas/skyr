@@ -44,6 +44,8 @@ pub trait Visitor<'a> {
 
     fn visit_integer_literal(&mut self, integer_literal: &'a IntegerLiteral) {}
 
+    fn visit_boolean_literal(&mut self, boolean_literal: &'a BooleanLiteral) {}
+
     fn enter_member_access(&mut self, member_access: &'a MemberAccess) {}
     fn leave_member_access(&mut self, member_access: &'a MemberAccess) {}
 
@@ -82,6 +84,12 @@ pub trait Visitor<'a> {
 
     fn enter_import(&mut self, import: &'a Import) {}
     fn leave_import(&mut self, import: &'a Import) {}
+
+    fn enter_if(&mut self, if_: &'a If) {}
+    fn leave_if(&mut self, if_: &'a If) {}
+
+    fn enter_block(&mut self, block: &'a Block) {}
+    fn leave_block(&mut self, block: &'a Block) {}
 }
 
 pub trait Visitable {
@@ -139,6 +147,8 @@ pub enum Statement {
     Return(Return),
     Debug(Debug),
     Import(Import),
+    If(Box<If>),
+    Block(Block),
 }
 
 impl Visitable for Statement {
@@ -151,6 +161,8 @@ impl Visitable for Statement {
             Statement::Return(n) => n.visit(visitor),
             Statement::Debug(n) => n.visit(visitor),
             Statement::Import(n) => n.visit(visitor),
+            Statement::If(n) => n.visit(visitor),
+            Statement::Block(n) => n.visit(visitor),
         }
         visitor.leave_statement(self);
     }
@@ -165,6 +177,8 @@ impl HasSpan for Statement {
             Statement::Return(r) => r.span.clone(),
             Statement::Debug(r) => r.span.clone(),
             Statement::Import(r) => r.span.clone(),
+            Statement::If(r) => r.span.clone(),
+            Statement::Block(r) => r.span.clone(),
         }
     }
 }
@@ -204,6 +218,22 @@ impl Parser for Statement {
             }) => {
                 let (import, tokens) = Import::parse(tokens)?;
                 return Ok((Statement::Import(import), tokens));
+            }
+
+            Some(Token {
+                kind: TokenKind::IfKeyword,
+                ..
+            }) => {
+                let (if_, tokens) = If::parse(tokens)?;
+                return Ok((Statement::If(Box::new(if_)), tokens));
+            }
+
+            Some(Token {
+                kind: TokenKind::OpenCurly,
+                ..
+            }) => {
+                let (block, tokens) = Block::parse(tokens)?;
+                return Ok((Statement::Block(block), tokens));
             }
 
             _ => {}
@@ -258,7 +288,7 @@ impl Parser for Statement {
                         }
                         t => {
                             return Err(ParseError::Expected(
-                                "string literal",
+                                "equal sign",
                                 t.map(|t| t.span.clone()),
                             ))
                         }
@@ -275,6 +305,7 @@ impl Parser for Statement {
 pub enum Expression {
     StringLiteral(StringLiteral),
     IntegerLiteral(IntegerLiteral),
+    BooleanLiteral(BooleanLiteral),
     Identifier(Identifier),
     Construct(Box<Construct>),
     Record(Record<Expression>),
@@ -289,6 +320,7 @@ impl Visitable for Expression {
         match self {
             Expression::StringLiteral(n) => n.visit(visitor),
             Expression::IntegerLiteral(n) => n.visit(visitor),
+            Expression::BooleanLiteral(n) => n.visit(visitor),
             Expression::Identifier(n) => n.visit(visitor),
             Expression::Construct(n) => n.visit(visitor),
             Expression::Record(n) => n.visit(visitor),
@@ -305,6 +337,7 @@ impl HasSpan for Expression {
         match self {
             Expression::StringLiteral(n) => n.span.clone(),
             Expression::IntegerLiteral(n) => n.span.clone(),
+            Expression::BooleanLiteral(n) => n.span.clone(),
             Expression::Construct(n) => n.span.clone(),
             Expression::Identifier(n) => n.span.clone(),
             Expression::Record(n) => n.span.clone(),
@@ -336,6 +369,14 @@ impl Parser for LeafExpression {
             }) => {
                 let (literal, tokens) = IntegerLiteral::parse(tokens)?;
                 Ok((Expression::IntegerLiteral(literal), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::TrueKeyword | TokenKind::FalseKeyword,
+                ..
+            }) => {
+                let (literal, tokens) = BooleanLiteral::parse(tokens)?;
+                Ok((Expression::BooleanLiteral(literal), tokens))
             }
 
             Some(Token {
@@ -490,6 +531,55 @@ impl Parser for IntegerLiteral {
             }
             t => Err(ParseError::Expected(
                 "integer literal",
+                t.map(|t| t.span.clone()),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BooleanLiteral {
+    pub span: Span,
+    pub value: bool,
+}
+
+impl Visitable for BooleanLiteral {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.visit_boolean_literal(self);
+    }
+}
+
+impl Parser for BooleanLiteral {
+    type Output = Self;
+
+    fn parse<'a>(tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        match tokens.get(0) {
+            Some(Token {
+                span,
+                kind: TokenKind::TrueKeyword,
+            }) => {
+                return Ok((
+                    BooleanLiteral {
+                        span: span.clone(),
+                        value: true,
+                    },
+                    &tokens[1..],
+                ));
+            }
+            Some(Token {
+                span,
+                kind: TokenKind::FalseKeyword,
+            }) => {
+                return Ok((
+                    BooleanLiteral {
+                        span: span.clone(),
+                        value: false,
+                    },
+                    &tokens[1..],
+                ));
+            }
+            t => Err(ParseError::Expected(
+                "boolean literal",
                 t.map(|t| t.span.clone()),
             )),
         }
@@ -883,7 +973,7 @@ pub struct Function {
     pub span: Span,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeExpression>,
-    pub body: Vec<Statement>,
+    pub body: Block,
 }
 
 impl Visitable for Function {
@@ -895,9 +985,7 @@ impl Visitable for Function {
         if let Some(return_type) = &self.return_type {
             return_type.visit(visitor);
         }
-        for statement in &self.body {
-            statement.visit(visitor);
-        }
+        self.body.visit(visitor);
         visitor.leave_function(self);
     }
 }
@@ -971,48 +1059,11 @@ impl Parser for Function {
             return_type = Some(t);
         }
 
-        if let Some(Token {
-            kind: TokenKind::OpenCurly,
-            ..
-        }) = tokens.get(0)
-        {
-            tokens = &tokens[1..];
-        } else {
-            return Err(ParseError::Expected(
-                "function body",
-                tokens.get(0).map(|t| t.span.clone()),
-            ));
-        }
-
-        let mut body = vec![];
-        while tokens
-            .get(0)
-            .map(|t| !matches!(t.kind, TokenKind::CloseCurly))
-            .unwrap_or(false)
-        {
-            let statement;
-            (statement, tokens) = Statement::parse(tokens)?;
-            body.push(statement);
-        }
-
-        let end;
-        if let Some(Token {
-            kind: TokenKind::CloseCurly,
-            span,
-        }) = tokens.get(0)
-        {
-            tokens = &tokens[1..];
-            end = span.end;
-        } else {
-            return Err(ParseError::Expected(
-                "end of function body",
-                tokens.get(0).map(|t| t.span.clone()),
-            ));
-        }
+        let (body, tokens) = Block::parse(tokens)?;
 
         Ok((
             Function {
-                span: start..end,
+                span: start..body.span.end,
                 parameters,
                 return_type,
                 body,
@@ -1228,6 +1279,173 @@ impl Parser for Import {
                 id: Default::default(),
                 span: start..identifier.span.end,
                 identifier,
+            },
+            tokens,
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct If {
+    pub span: Span,
+    pub condition: Expression,
+    pub consequence: Statement,
+    pub else_clause: Option<Statement>,
+}
+
+impl Visitable for If {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_if(self);
+        self.condition.visit(visitor);
+        self.consequence.visit(visitor);
+        if let Some(else_clause) = &self.else_clause {
+            else_clause.visit(visitor);
+        }
+        visitor.leave_if(self);
+    }
+}
+
+impl Parser for If {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::IfKeyword,
+            span,
+        }) = tokens.get(0)
+        {
+            start = span.start;
+            tokens = &tokens[1..];
+        } else {
+            return Err(ParseError::Expected(
+                "if statement",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        if let Some(Token {
+            kind: TokenKind::OpenParen,
+            ..
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+        } else {
+            return Err(ParseError::Expected(
+                "parenthesized condition",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let (condition, mut tokens) = Expression::parse(tokens)?;
+
+        if let Some(Token {
+            kind: TokenKind::CloseParen,
+            ..
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+        } else {
+            return Err(ParseError::Expected(
+                "closing parenthesis",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let (consequence, mut tokens) = Statement::parse(tokens)?;
+
+        let mut end = consequence.span().end;
+        let mut else_clause = None;
+        if let Some(Token {
+            kind: TokenKind::ElseKeyword,
+            ..
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+
+            let clause;
+            (clause, tokens) = Statement::parse(tokens)?;
+            end = clause.span().end;
+            else_clause = Some(clause);
+        }
+
+        Ok((
+            If {
+                span: start..end,
+                condition,
+                consequence,
+                else_clause,
+            },
+            tokens,
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Block {
+    pub span: Span,
+    pub statements: Vec<Statement>,
+}
+
+impl Visitable for Block {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_block(self);
+        for statement in self.statements.iter() {
+            statement.visit(visitor);
+        }
+        visitor.leave_block(self);
+    }
+}
+
+impl Parser for Block {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::OpenCurly,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            start = span.start;
+        } else {
+            return Err(ParseError::Expected(
+                "block",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let mut statements = vec![];
+        while tokens
+            .get(0)
+            .map(|t| !matches!(t.kind, TokenKind::CloseCurly))
+            .unwrap_or(false)
+        {
+            let statement;
+            (statement, tokens) = Statement::parse(tokens)?;
+            statements.push(statement);
+        }
+
+        let end;
+        if let Some(Token {
+            kind: TokenKind::CloseCurly,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            end = span.end;
+        } else {
+            return Err(ParseError::Expected(
+                "end of block",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        Ok((
+            Block {
+                span: start..end,
+                statements,
             },
             tokens,
         ))

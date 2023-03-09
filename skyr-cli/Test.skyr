@@ -16,3 +16,12 @@ id3 = Random.Identifier {
   name: id2.hex
   byteLength: 3
 }
+
+if (false) {
+  Random.Identifier {
+    name: "test"
+    byteLength: 4
+  }
+} else {
+  debug 123
+}

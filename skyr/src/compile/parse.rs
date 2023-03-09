@@ -26,6 +26,10 @@ pub enum TokenKind<'a> {
     ReturnKeyword,
     DebugKeyword,
     ImportKeyword,
+    TrueKeyword,
+    FalseKeyword,
+    IfKeyword,
+    ElseKeyword,
 
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
@@ -155,6 +159,10 @@ impl<'a> Lexer<'a> {
             "return" => TokenKind::ReturnKeyword,
             "debug" => TokenKind::DebugKeyword,
             "import" => TokenKind::ImportKeyword,
+            "true" => TokenKind::TrueKeyword,
+            "false" => TokenKind::FalseKeyword,
+            "if" => TokenKind::IfKeyword,
+            "else" => TokenKind::ElseKeyword,
             _ => TokenKind::Symbol(symbol),
         }
     }

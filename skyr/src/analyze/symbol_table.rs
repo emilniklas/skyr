@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::compile::{
     Assignment, CompileError, Expression, Function, Identifier, Import, Module, NodeId, Parameter,
-    Record, TypeDefinition, TypeExpression, Visitable, Visitor,
+    Record, TypeDefinition, TypeExpression, Visitable, Visitor, Block,
 };
 
 #[derive(Debug)]
@@ -219,6 +219,14 @@ impl<'a> Visitor<'a> for SymbolCollector<'a> {
     }
 
     fn leave_function(&mut self, _function: &'a Function) {
+        self.scope.leave();
+    }
+
+    fn enter_block(&mut self, _block: &'a Block) {
+        self.scope.enter();
+    }
+
+    fn leave_block(&mut self, _block: &'a Block) {
         self.scope.leave();
     }
 }

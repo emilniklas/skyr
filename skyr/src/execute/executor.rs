@@ -139,6 +139,8 @@ impl<'a> Executor<'a> {
             Statement::Return(r) => return self.execute_expression(ctx, &r.expression),
             Statement::TypeDefinition(_) => Value::Nil,
             Statement::Import(i) => self.execute_import(ctx, i).await,
+            Statement::If(i) => self.execute_if(ctx, i).await,
+            Statement::Block(b) => self.execute_block(ctx, b).await,
         };
         Value::defer(move |e| {
             let exp = exp.clone();
@@ -151,6 +153,56 @@ impl<'a> Executor<'a> {
                 }
                 Value::Nil
             })
+        })
+    }
+
+    pub async fn execute_if(&self, ctx: ExecutionContext<'a>, if_: &'a If) -> Value<'a> {
+        let condition = self.execute_expression(ctx.clone(), &if_.condition);
+
+        Value::defer(move |e| {
+            let condition = condition.clone();
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                let condition = condition.resolve(e).await;
+
+                if let Value::Pending(deps) = condition {
+                    e.is_pending.fetch_or(true, Ordering::SeqCst);
+                    return Value::Pending(deps);
+                }
+
+                if condition.as_bool() {
+                    e.execute_statement(ctx, &if_.consequence).await
+                } else if let Some(else_clause) = &if_.else_clause {
+                    e.execute_statement(ctx, else_clause).await
+                } else {
+                    Value::Nil
+                }
+            })
+        })
+    }
+
+    pub fn execute_block(
+        &self,
+        ctx: ExecutionContext<'a>,
+        block: &'a Block,
+    ) -> Pin<Box<dyn '_ + Future<Output = Value<'a>>>> {
+        Box::pin(async move {
+            let fo = FuturesUnordered::new();
+
+            let mut values = vec![];
+            for statement in block.statements.iter() {
+                values.push(self.execute_statement(ctx.clone(), statement).await);
+            }
+
+            for value in values {
+                fo.push(value.resolve(self));
+            }
+
+            fo.collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .find(|v| !matches!(v, Value::Nil))
+                .unwrap_or(Value::Nil)
         })
     }
 
@@ -205,6 +257,7 @@ impl<'a> Executor<'a> {
                 match expression {
                     Expression::StringLiteral(s) => Value::String(s.value.clone()),
                     Expression::IntegerLiteral(i) => Value::Integer(i.value),
+                    Expression::BooleanLiteral(i) => Value::Boolean(i.value),
                     Expression::Identifier(id) => {
                         let binding_id =
                             ctx.table.declaration(id).expect("undefined reference").id();
@@ -283,22 +336,7 @@ impl<'a> Executor<'a> {
                     }
                 }
 
-                let fo = FuturesUnordered::new();
-
-                let mut values = vec![];
-                for statement in function.body.iter() {
-                    values.push(executor.execute_statement(ctx.clone(), statement).await);
-                }
-
-                for value in values {
-                    fo.push(value.resolve(executor));
-                }
-
-                fo.collect::<Vec<_>>()
-                    .await
-                    .into_iter()
-                    .find(|v| !matches!(v, Value::Nil))
-                    .unwrap_or(Value::Nil)
+                executor.execute_block(ctx, &function.body).await
             })
         }))
     }
@@ -309,6 +347,7 @@ pub enum Value<'a> {
     Nil,
     String(String),
     Integer(i128),
+    Boolean(bool),
     Deferred(Deferred<'a>),
     Record(Vec<(String, Value<'a>)>),
     Function(
@@ -359,6 +398,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
             },
             Value::String(s) => fmt::Debug::fmt(s, f),
             Value::Integer(i) => fmt::Debug::fmt(i, f),
+            Value::Boolean(b) => fmt::Debug::fmt(b, f),
             Value::Nil => write!(f, "<nil>"),
             Value::Record(fields) => {
                 let mut s = f.debug_map();
@@ -382,7 +422,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
 impl<'a> Value<'a> {
     pub fn dependencies(&self) -> Vec<ResourceId> {
         match self {
-            Value::Nil | Value::String(_) | Value::Integer(_) => vec![],
+            Value::Nil | Value::String(_) | Value::Integer(_) | Value::Boolean(_) => vec![],
             Value::Deferred(_) => panic!("cannot get dependencies from deferred"),
             Value::Record(r) => {
                 let mut result = vec![];
@@ -530,6 +570,14 @@ impl<'a> Value<'a> {
         }
     }
 
+    pub fn as_bool(&self) -> bool {
+        if let Value::Boolean(b) = self {
+            *b
+        } else {
+            panic!("{:?} is not a boolean", self)
+        }
+    }
+
     pub fn as_i128(&self) -> i128 {
         if let Value::Integer(i) = self {
             *i
@@ -600,6 +648,7 @@ impl<'a> From<ResourceValue> for Value<'a> {
             ResourceValue::Nil => Self::Nil,
             ResourceValue::String(s) => Self::String(s),
             ResourceValue::Integer(i) => Self::Integer(i),
+            ResourceValue::Boolean(b) => Self::Boolean(b),
             ResourceValue::Record(r) => {
                 Self::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
             }

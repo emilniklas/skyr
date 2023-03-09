@@ -88,6 +88,7 @@ pub enum ResourceValue {
     Nil,
     String(String),
     Integer(i128),
+    Boolean(bool),
     Record(Vec<(String, ResourceValue)>),
 }
 
@@ -137,6 +138,7 @@ impl From<Value<'_>> for ResourceValue {
             Value::Nil => ResourceValue::Nil,
             Value::String(s) => ResourceValue::String(s),
             Value::Integer(i) => ResourceValue::Integer(i),
+            Value::Boolean(b) => ResourceValue::Boolean(b),
             Value::Record(r) => {
                 ResourceValue::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
             }

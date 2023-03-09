@@ -66,6 +66,7 @@ impl<'a> TypeEnvironment<'a> {
             (Type::Void, Type::Void) => Type::Void,
             (Type::String, Type::String) => Type::String,
             (Type::Integer, Type::Integer) => Type::Integer,
+            (Type::Boolean, Type::Boolean) => Type::Boolean,
             (Type::Function(lhs_a, lhs_r), Type::Function(rhs_a, rhs_r)) => {
                 let arity = lhs_a.len().min(rhs_a.len());
 
@@ -160,6 +161,7 @@ impl<'a> TypeEnvironment<'a> {
             Type::Void => Type::Void,
             Type::String => Type::String,
             Type::Integer => Type::Integer,
+            Type::Boolean => Type::Boolean,
             Type::Open(id) if seen_ids.contains(&id) => Type::Open(id),
             Type::Open(id) => self
                 .bindings
@@ -255,8 +257,25 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Statement::Return(n) => return self.check_expression(&n.expression),
             Statement::Debug(n) => self.check_expression(&n.expression),
             Statement::Import(n) => self.check_import(n),
+            Statement::Block(n) => self.check_block(n),
+            Statement::If(n) => self.check_if(n),
         };
         Type::Void
+    }
+
+    pub fn check_if(&mut self, if_: &'a If) -> Type {
+        let condition_type = self.check_expression(&if_.condition);
+        let mut consequence_type = self.check_statement(&if_.consequence);
+        let else_type = if_.else_clause.as_ref().map(|c| (c, self.check_statement(c)));
+
+        let mut env = TypeEnvironment::new(&mut self.errors);
+
+        env.unify(Type::Boolean, condition_type, &if_.condition.span());
+        if let Some((clause, type_)) = else_type {
+            consequence_type = env.unify(consequence_type, type_, &clause.span());
+        }
+
+        env.resolve(consequence_type)
     }
 
     pub fn check_import(&mut self, import: &'a Import) -> Type {
@@ -312,6 +331,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         match expression {
             Expression::StringLiteral(_) => Type::String,
             Expression::IntegerLiteral(_) => Type::Integer,
+            Expression::BooleanLiteral(_) => Type::Boolean,
             Expression::Identifier(id) => self
                 .symbols
                 .declaration(id)
@@ -378,6 +398,16 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         env.resolve(return_type)
     }
 
+    pub fn check_block(&mut self, block: &'a Block) -> Type {
+        for statement in &block.statements {
+            let t = self.check_statement(statement);
+            if !matches!(t, Type::Void) {
+                return t;
+            }
+        }
+        Type::Void
+    }
+
     pub fn check_function(&mut self, function: &'a Function) -> Type {
         let parameter_types = function
             .parameters
@@ -397,14 +427,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             .map(|rt| self.check_type_expression(rt))
             .unwrap_or_default();
 
-        let mut actual_return_type = Type::Void;
-        for statement in &function.body {
-            let t = self.check_statement(statement);
-            if !matches!(t, Type::Void) {
-                actual_return_type = t;
-                break;
-            }
-        }
+        let actual_return_type = self.check_block(&function.body);
 
         let mut env = TypeEnvironment::new(&mut self.errors);
 
@@ -536,6 +559,7 @@ pub enum Type {
     Void,
     String,
     Integer,
+    Boolean,
     Open(TypeId),
     Record(Vec<(String, Type)>),
     Named(String, Box<Type>),
@@ -569,6 +593,7 @@ impl Type {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
             Type::Integer => write!(f, "Integer"),
+            Type::Boolean => write!(f, "Boolean"),
             Type::Record(fields) => {
                 let mut s = f.debug_map();
                 for field in fields {
