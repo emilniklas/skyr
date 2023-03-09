@@ -319,6 +319,63 @@ impl<'a> Executor<'a> {
                             panic!("cannot construct {:?}", subject);
                         }
                     }
+                    Expression::BinaryOperation(op) => {
+                        let (lhs, rhs) = futures::future::join(
+                            executor
+                                .execute_expression(ctx.clone(), &op.lhs)
+                                .resolve(executor),
+                            executor
+                                .execute_expression(ctx.clone(), &op.rhs)
+                                .resolve(executor),
+                        )
+                        .await;
+
+                        match (lhs, &op.operator.kind, rhs) {
+                            (Value::Pending(mut l), _, Value::Pending(r)) => {
+                                l.extend(r);
+                                Value::Pending(l)
+                            }
+
+                            (Value::Pending(ids), _, _) | (_, _, Value::Pending(ids)) => {
+                                Value::Pending(ids)
+                            }
+
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::LessThan,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs < rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::LessThanOrEqualTo,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs <= rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::EqualTo,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs == rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::NotEqualTo,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs != rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::GreaterThanOrEqualTo,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs >= rhs),
+                            (
+                                Value::Integer(lhs),
+                                BinaryOperatorKind::GreaterThan,
+                                Value::Integer(rhs),
+                            ) => Value::Boolean(lhs > rhs),
+
+                            (lhs, op, rhs) => {
+                                panic!("invalid operation: {:?} {:?} {:?}", lhs, op, rhs)
+                            }
+                        }
+                    }
                 }
             })
         })

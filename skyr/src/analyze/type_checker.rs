@@ -345,7 +345,22 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Expression::Call(c) => self.check_call(c),
             Expression::Construct(c) => self.check_construct(c),
             Expression::MemberAccess(ma) => self.check_member_access(ma),
+            Expression::BinaryOperation(op) => self.check_binary_operation(op),
         }
+    }
+
+    pub fn check_binary_operation(&mut self, operation: &'a BinaryOperation) -> Type {
+        let mut type_ = Type::default();
+
+        let lhs_type = self.check_expression(&operation.lhs);
+        let rhs_type = self.check_expression(&operation.rhs);
+
+        let mut env = TypeEnvironment::new(&mut self.errors);
+
+        type_ = env.unify(type_, lhs_type, &operation.span);
+        type_ = env.unify(type_, rhs_type, &operation.span);
+
+        env.resolve(type_)
     }
 
     pub fn check_member_access(&mut self, member_access: &'a MemberAccess) -> Type {

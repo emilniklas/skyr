@@ -14,12 +14,19 @@ pub enum TokenKind<'a> {
     CloseCurly,
     OpenParen,
     CloseParen,
+    OpenAngle,
+    CloseAngle,
 
     Arrow,
     Colon,
     Comma,
     Period,
     EqualSign,
+
+    LessThanOrEqualSign,
+    GreaterThanOrEqualSign,
+    DoubleEqualSign,
+    NotEqualSign,
 
     TypeKeyword,
     FnKeyword,
@@ -86,6 +93,34 @@ impl<'a> Lexer<'a> {
                 return TokenKind::Arrow;
             }
 
+            Some('<') if chars.next() == Some('=') => {
+                self.location.increment_character();
+                self.location.increment_character();
+                self.code = &self.code[2..];
+                return TokenKind::LessThanOrEqualSign;
+            }
+
+            Some('>') if chars.next() == Some('=') => {
+                self.location.increment_character();
+                self.location.increment_character();
+                self.code = &self.code[2..];
+                return TokenKind::GreaterThanOrEqualSign;
+            }
+
+            Some('!') if chars.next() == Some('=') => {
+                self.location.increment_character();
+                self.location.increment_character();
+                self.code = &self.code[2..];
+                return TokenKind::NotEqualSign;
+            }
+
+            Some('=') if chars.next() == Some('=') => {
+                self.location.increment_character();
+                self.location.increment_character();
+                self.code = &self.code[2..];
+                return TokenKind::DoubleEqualSign;
+            }
+
             Some('"') => return self.string_literal(),
 
             Some(c) if c >= '0' && c <= '9' => return self.integer_literal(),
@@ -106,6 +141,9 @@ impl<'a> Lexer<'a> {
 
             Some('(') => TokenKind::OpenParen,
             Some(')') => TokenKind::CloseParen,
+
+            Some('<') => TokenKind::OpenAngle,
+            Some('>') => TokenKind::CloseAngle,
 
             Some(',') => TokenKind::Comma,
             Some(':') => TokenKind::Colon,

@@ -8,6 +8,9 @@ pub use ast::*;
 mod parse;
 pub use parse::*;
 
+mod shunting_yard;
+pub use shunting_yard::*;
+
 use std::fmt;
 use crate::analyze::TypeError;
 

@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use super::{HasSpan, ParseError, ParseResult, Parser, Span, Token, TokenKind};
+use super::{HasSpan, ParseError, ParseResult, Parser, ShuntingYard, Span, Token, TokenKind};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u64);
@@ -90,6 +90,11 @@ pub trait Visitor<'a> {
 
     fn enter_block(&mut self, block: &'a Block) {}
     fn leave_block(&mut self, block: &'a Block) {}
+
+    fn enter_binary_operation(&mut self, binary_operation: &'a BinaryOperation) {}
+    fn leave_binary_operation(&mut self, binary_operation: &'a BinaryOperation) {}
+
+    fn visit_binary_operator(&mut self, binary_operator: &'a BinaryOperator) {}
 }
 
 pub trait Visitable {
@@ -312,6 +317,7 @@ pub enum Expression {
     MemberAccess(Box<MemberAccess>),
     Function(Box<Function>),
     Call(Box<Call>),
+    BinaryOperation(Box<BinaryOperation>),
 }
 
 impl Visitable for Expression {
@@ -327,6 +333,7 @@ impl Visitable for Expression {
             Expression::MemberAccess(n) => n.visit(visitor),
             Expression::Function(n) => n.visit(visitor),
             Expression::Call(n) => n.visit(visitor),
+            Expression::BinaryOperation(n) => n.visit(visitor),
         }
         visitor.leave_expression(self);
     }
@@ -344,6 +351,7 @@ impl HasSpan for Expression {
             Expression::MemberAccess(n) => n.span.clone(),
             Expression::Function(n) => n.span.clone(),
             Expression::Call(n) => n.span.clone(),
+            Expression::BinaryOperation(n) => n.span.clone(),
         }
     }
 }
@@ -418,6 +426,8 @@ impl Parser for Expression {
         let mut expression;
         (expression, tokens) = LeafExpression::parse(tokens)?;
 
+        let mut shunting_yard = ShuntingYard::default();
+
         loop {
             match tokens.get(0) {
                 Some(Token {
@@ -430,7 +440,8 @@ impl Parser for Expression {
                         span: expression.span().start..record.span.end,
                         subject: expression,
                         record,
-                    }))
+                    }));
+                    continue;
                 }
 
                 Some(Token {
@@ -444,7 +455,8 @@ impl Parser for Expression {
                         span: expression.span().start..identifier.span.end,
                         subject: expression,
                         identifier,
-                    }))
+                    }));
+                    continue;
                 }
 
                 Some(Token {
@@ -492,10 +504,21 @@ impl Parser for Expression {
                         callee: expression,
                         arguments,
                     }));
+                    continue;
                 }
 
-                _ => return Ok((expression, tokens)),
+                _ => {}
             }
+
+            shunting_yard.add_expression(expression);
+
+            if let Ok((operator, t)) = BinaryOperator::parse(tokens) {
+                shunting_yard.add_operator(operator);
+                (expression, tokens) = LeafExpression::parse(t)?;
+                continue;
+            }
+
+            return Ok((shunting_yard.resolve(), tokens));
         }
     }
 }
@@ -1449,5 +1472,159 @@ impl Parser for Block {
             },
             tokens,
         ))
+    }
+}
+
+#[derive(Debug)]
+pub enum BinaryOperatorKind {
+    LessThan,
+    LessThanOrEqualTo,
+    EqualTo,
+    GreaterThanOrEqualTo,
+    GreaterThan,
+    NotEqualTo,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum OperatorPrecedence {
+    Or,
+    And,
+    Equality,
+    Comparison,
+    Additive,
+    Multiplicative,
+}
+
+impl BinaryOperatorKind {
+    pub fn precedence(&self) -> OperatorPrecedence {
+        use BinaryOperatorKind::*;
+
+        match self {
+            LessThan | LessThanOrEqualTo | GreaterThanOrEqualTo | GreaterThan => {
+                OperatorPrecedence::Comparison
+            }
+
+            EqualTo | NotEqualTo => OperatorPrecedence::Equality,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BinaryOperator {
+    pub span: Span,
+    pub kind: BinaryOperatorKind,
+}
+
+impl BinaryOperator {
+    #[inline]
+    pub fn precedence(&self) -> OperatorPrecedence {
+        self.kind.precedence()
+    }
+
+    pub fn is_left_associative(&self) -> bool {
+        true
+    }
+}
+
+impl Parser for BinaryOperator {
+    type Output = Self;
+
+    fn parse<'a>(tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        match tokens.get(0) {
+            Some(Token {
+                kind: TokenKind::OpenAngle,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::LessThan,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::LessThanOrEqualSign,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::LessThanOrEqualTo,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::DoubleEqualSign,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::EqualTo,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::GreaterThanOrEqualSign,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::GreaterThanOrEqualTo,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::CloseAngle,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::GreaterThan,
+                },
+                &tokens[1..],
+            )),
+
+            Some(Token {
+                kind: TokenKind::NotEqualSign,
+                span,
+            }) => Ok((
+                BinaryOperator {
+                    span: span.clone(),
+                    kind: BinaryOperatorKind::NotEqualTo,
+                },
+                &tokens[1..],
+            )),
+
+            t => Err(ParseError::Expected(
+                "binary operator",
+                t.map(|t| t.span.clone()),
+            )),
+        }
+    }
+}
+
+impl Visitable for BinaryOperator {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.visit_binary_operator(self);
+    }
+}
+
+#[derive(Debug)]
+pub struct BinaryOperation {
+    pub span: Span,
+    pub lhs: Expression,
+    pub operator: BinaryOperator,
+    pub rhs: Expression,
+}
+
+impl Visitable for BinaryOperation {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_binary_operation(self);
+        self.lhs.visit(visitor);
+        self.operator.visit(visitor);
+        self.rhs.visit(visitor);
+        visitor.leave_binary_operation(self);
     }
 }

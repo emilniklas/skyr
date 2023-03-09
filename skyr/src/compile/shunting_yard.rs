@@ -1,0 +1,72 @@
+use super::{BinaryOperator, Expression, BinaryOperation, HasSpan};
+
+#[derive(Default)]
+pub struct ShuntingYard {
+    operators: Vec<BinaryOperator>,
+    output: Vec<Member>,
+}
+
+impl ShuntingYard {
+    pub fn add_expression(&mut self, expression: Expression) {
+        self.output.insert(0, Member::Expression(expression));
+    }
+
+    pub fn add_operator(&mut self, o1: BinaryOperator) {
+        loop {
+            let o2 = match self.operators.pop() {
+                None => break,
+
+                Some(o2) => o2,
+            };
+
+            let o1p = o1.precedence();
+            let o2p = o2.precedence();
+
+            if o2p > o1p || (o1.is_left_associative() && o1p == o2p) {
+                self.output.insert(0, Member::Operator(o2));
+            } else {
+                self.operators.push(o2);
+                break;
+            }
+        }
+
+        self.operators.push(o1);
+    }
+
+    pub fn resolve(mut self) -> Expression {
+        while let Some(op) = self.operators.pop() {
+            self.output.insert(0, Member::Operator(op));
+        }
+
+        let mut lhs = match self.output.pop() {
+            None => panic!("empty expression"),
+            Some(Member::Operator(_)) => panic!("cannot start with operator"),
+            Some(Member::Expression(e)) => Some(e),
+        };
+        let mut rhs = None;
+
+        while let Some(member) = self.output.pop() {
+            match member {
+                Member::Expression(e) => rhs = Some(e),
+                Member::Operator(op) => {
+                    let ls = lhs.take().expect("sequence error");
+                    let rs = rhs.take().expect("sequence error");
+                    lhs = Some(Expression::BinaryOperation(Box::new(BinaryOperation {
+                        span: ls.span().start..rs.span().end,
+                        lhs: ls,
+                        operator: op,
+                        rhs: rs,
+                    })));
+                }
+            }
+        }
+
+        lhs.unwrap()
+    }
+}
+
+#[derive(Debug)]
+enum Member {
+    Expression(Expression),
+    Operator(BinaryOperator),
+}
