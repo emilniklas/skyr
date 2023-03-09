@@ -5,6 +5,11 @@ allowing for expressive and highly dynamic IaC solutions.
 
 [iac]: https://en.wikipedia.org/wiki/Infrastructure_as_code
 
+## Disclaimer
+
+Please note that this is a quick and dirty repo, very much in early development.
+Don't use this for anything real!
+
 ## Usage
 
 At its core, Skyr is a basic functional language:
