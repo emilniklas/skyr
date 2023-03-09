@@ -34,6 +34,10 @@ pub struct State {
 }
 
 impl State {
+    pub fn into_resources(self) -> BTreeMap<ResourceId, Resource> {
+        self.resources.into_inner().unwrap()
+    }
+
     pub fn open(reader: impl io::Read) -> io::Result<State> {
         bincode::deserialize_from(reader).map_err(Self::bincode_to_io_error)
     }

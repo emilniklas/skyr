@@ -19,6 +19,13 @@ enum Command {
         approve: bool,
     },
     Plan,
+    #[clap(subcommand)]
+    State(StateCommand),
+}
+
+#[derive(Parser)]
+enum StateCommand {
+    Inspect
 }
 
 #[async_std::main]
@@ -42,6 +49,7 @@ async fn main() -> io::Result<ExitCode> {
     match command {
         Command::Apply { approve } => apply(approve, plugins).await,
         Command::Plan => plan(plugins).await,
+        Command::State(StateCommand::Inspect) => inspect_state().await,
     }
 }
 
@@ -65,6 +73,15 @@ async fn state() -> State {
         .await
         .and_then(|s| skyr::State::open(s.as_slice()))
         .unwrap_or_default()
+}
+
+async fn inspect_state() -> io::Result<ExitCode> {
+    let state = state().await;
+    let resources = state.into_resources();
+    for (id, resource) in resources {
+        println!("{:?} {:#?}", id, resource.state);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn plan(plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {

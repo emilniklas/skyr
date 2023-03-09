@@ -1,10 +1,16 @@
 import List
 import Random
 
+identity = fn(x) => x
+
 id = Random.Identifier {
   name: "test"
   byteLength: 3
 }
 
-debug id.bytes
-debug List.map(id.bytes, fn(x) => x * 3)
+debug List.first(
+  List.map(
+    List.map(["hello", id.hex], identity)
+    identity
+  )
+)
