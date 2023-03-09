@@ -139,8 +139,8 @@ impl<'a> Executor<'a> {
             Statement::Return(r) => return self.execute_expression(ctx, &r.expression),
             Statement::TypeDefinition(_) => Value::Nil,
             Statement::Import(i) => self.execute_import(ctx, i).await,
-            Statement::If(i) => self.execute_if(ctx, i).await,
-            Statement::Block(b) => self.execute_block(ctx, b).await,
+            Statement::If(i) => return self.execute_if(ctx, i).await,
+            Statement::Block(b) => return self.execute_block(ctx, b).await,
         };
         Value::defer(move |e| {
             let exp = exp.clone();

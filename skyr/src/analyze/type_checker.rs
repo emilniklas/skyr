@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::compile::*;
 
@@ -257,8 +257,8 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Statement::Return(n) => return self.check_expression(&n.expression),
             Statement::Debug(n) => self.check_expression(&n.expression),
             Statement::Import(n) => self.check_import(n),
-            Statement::Block(n) => self.check_block(n),
-            Statement::If(n) => self.check_if(n),
+            Statement::Block(n) => return self.check_block(n),
+            Statement::If(n) => return self.check_if(n),
         };
         Type::Void
     }
@@ -266,7 +266,10 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
     pub fn check_if(&mut self, if_: &'a If) -> Type {
         let condition_type = self.check_expression(&if_.condition);
         let mut consequence_type = self.check_statement(&if_.consequence);
-        let else_type = if_.else_clause.as_ref().map(|c| (c, self.check_statement(c)));
+        let else_type = if_
+            .else_clause
+            .as_ref()
+            .map(|c| (c, self.check_statement(c)));
 
         let mut env = TypeEnvironment::new(&mut self.errors);
 
@@ -399,13 +402,14 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
     }
 
     pub fn check_block(&mut self, block: &'a Block) -> Type {
+        let mut return_type = Type::Void;
         for statement in &block.statements {
             let t = self.check_statement(statement);
             if !matches!(t, Type::Void) {
-                return t;
+                return_type = t;
             }
         }
-        Type::Void
+        return_type
     }
 
     pub fn check_function(&mut self, function: &'a Function) -> Type {
@@ -442,11 +446,6 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
                 .symbols
                 .declaration(id)
                 .map(|d| Type::Named(id.symbol.clone(), Box::new(self.check_declaration(d))))
-                .or_else(|| match id.symbol.as_str() {
-                    "Void" => Some(Type::Void),
-                    "String" => Some(Type::String),
-                    _ => None,
-                })
                 .unwrap_or_default(),
             TypeExpression::Record(r) => self.check_type_record(r),
         }
@@ -462,6 +461,10 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Declaration::Assignment(a) => self.check_assignment(a),
             Declaration::TypeDefinition(td) => self.check_type_definition(td),
             Declaration::Import(i) => self.check_import(i),
+            Declaration::Builtin(_, "String") => Type::String,
+            Declaration::Builtin(_, "Integer") => Type::Integer,
+            Declaration::Builtin(_, "Boolean") => Type::Boolean,
+            Declaration::Builtin(_, s) => panic!("unknown builtin {:?}", s),
         }
     }
 

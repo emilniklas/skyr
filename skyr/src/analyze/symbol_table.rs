@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::compile::{
-    Assignment, CompileError, Expression, Function, Identifier, Import, Module, NodeId, Parameter,
-    Record, TypeDefinition, TypeExpression, Visitable, Visitor, Block,
+    Assignment, Block, CompileError, Expression, Function, Identifier, Import, Module, NodeId,
+    Parameter, Record, TypeDefinition, TypeExpression, Visitable, Visitor,
 };
 
 #[derive(Debug)]
@@ -56,6 +56,7 @@ pub enum Declaration<'a> {
     TypeDefinition(&'a TypeDefinition),
     Parameter(&'a Parameter),
     Import(&'a Import),
+    Builtin(NodeId, &'a str),
 }
 
 impl<'a> Declaration<'a> {
@@ -65,6 +66,7 @@ impl<'a> Declaration<'a> {
             Declaration::TypeDefinition(a) => a.id,
             Declaration::Parameter(a) => a.id,
             Declaration::Import(a) => a.id,
+            Declaration::Builtin(n, _) => *n,
         }
     }
 
@@ -74,6 +76,7 @@ impl<'a> Declaration<'a> {
             Declaration::TypeDefinition(a) => a.identifier == *id,
             Declaration::Parameter(a) => a.identifier == *id,
             Declaration::Import(a) => a.identifier == *id,
+            Declaration::Builtin(_, s) => s == &id.symbol,
         }
     }
 }
@@ -145,7 +148,6 @@ impl<'a> Scope<'a> {
     }
 }
 
-#[derive(Default)]
 pub struct SymbolCollector<'a> {
     table: SymbolTable<'a>,
     scope: Scope<'a>,
@@ -155,7 +157,17 @@ pub struct SymbolCollector<'a> {
 
 impl<'a> SymbolCollector<'a> {
     pub fn new() -> Self {
-        Self::default()
+        let mut type_scope = Scope::default();
+        type_scope.add_declaration(Declaration::Builtin(Default::default(), "String"));
+        type_scope.add_declaration(Declaration::Builtin(Default::default(), "Integer"));
+        type_scope.add_declaration(Declaration::Builtin(Default::default(), "Boolean"));
+
+        Self {
+            table: Default::default(),
+            scope: Default::default(),
+            type_table: Default::default(),
+            type_scope,
+        }
     }
 
     pub fn finalize(mut self, error: &mut Option<CompileError>) -> SymbolTable<'a> {

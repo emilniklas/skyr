@@ -682,7 +682,6 @@ dependencies = [
  "async-trait",
  "bincode",
  "futures",
- "rand",
  "serde",
 ]
 

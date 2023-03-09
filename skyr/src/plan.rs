@@ -26,6 +26,7 @@ pub enum PlanStepKind<'a> {
 pub struct Plan<'a> {
     steps: Vec<(ResourceId, PlanStepKind<'a>)>,
     debug_messages: Vec<(Span, Value<'a>)>,
+    is_continuation: bool,
 }
 
 impl<'a> fmt::Debug for Plan<'a> {
@@ -35,7 +36,11 @@ impl<'a> fmt::Debug for Plan<'a> {
         }
 
         if self.is_empty() {
-            return write!(f, "✅ Empty plan");
+            if self.is_continuation {
+                return write!(f, "✅ Nothing more to do");
+            } else {
+                return write!(f, "✅ Nothing to do");
+            }
         }
 
         for (i, (id, kind)) in self.steps.iter().enumerate() {
@@ -174,7 +179,9 @@ impl<'a> Plan<'a> {
             .await
             .unwrap_or(());
 
-        program.plan(&state).await
+        let mut plan = program.plan(&state).await;
+        plan.is_continuation = true;
+        plan
     }
 
     pub fn is_empty(&self) -> bool {

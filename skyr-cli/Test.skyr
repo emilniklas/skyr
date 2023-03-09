@@ -1,27 +1,16 @@
 import Random
 
-id1 = Random.Identifier {
-  name: "one"
-  byteLength: 4
-}
+f = fn(condition) -> String {
+  if (condition) {
+    id = Random.Identifier {
+      name: "one"
+      byteLength: 4
+    }
 
-id2 = Random.Identifier {
-  name: id1.hex
-  byteLength: 4
-}
-
-debug id1.hex
-
-id3 = Random.Identifier {
-  name: id2.hex
-  byteLength: 3
-}
-
-if (false) {
-  Random.Identifier {
-    name: "test"
-    byteLength: 4
+    return id.hex
+  } else {
+    return "hello"
   }
-} else {
-  debug 123
 }
+
+debug f(true)

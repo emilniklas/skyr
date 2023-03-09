@@ -102,13 +102,11 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let mut plan = program.plan(&state).await;
 
-        if plan.is_empty() {
-            println!("{:?}", plan);
-        }
+        println!("{:?}", plan);
 
         while !plan.is_empty() {
             if !approve {
-                print!("{:?}\n\nContinue? ", plan);
+                print!("\nContinue? ");
                 io::stdout().flush()?;
                 let mut line = String::new();
                 stdin.read_line(&mut line)?;
@@ -132,6 +130,8 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
             plan = plan.execute(&program, &state, tx).await;
 
             join.await;
+
+            println!("{:?}", plan);
         }
     }
 
