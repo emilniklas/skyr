@@ -1,6 +1,6 @@
 use crate::analyze::Type;
 use crate::execute::{ExecutionContext, Value};
-use crate::{ResourceId, ResourceValue};
+use crate::{Resource, ResourceId, ResourceValue};
 
 #[macro_export]
 macro_rules! export_plugin {
@@ -26,6 +26,7 @@ pub trait Plugin: Send + Sync {
     fn import_name(&self) -> &str;
     fn module_type(&self) -> Type;
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> Value<'a>;
+    fn find_resource(&self, resource: &Resource) -> Option<Box<dyn PluginResource>>;
 }
 
 #[async_trait::async_trait]
@@ -46,13 +47,9 @@ pub trait PluginResource {
 
     async fn create<'a>(&self, arg: Value<'a>) -> ResourceValue;
 
-    async fn read<'a>(&self, prev: ResourceValue) -> ResourceValue {
-        prev
-    }
+    async fn read<'a>(&self, prev: ResourceValue) -> ResourceValue;
 
     async fn update<'a>(&self, arg: Value<'a>, prev: ResourceValue) -> ResourceValue;
 
-    async fn delete<'a>(&self, prev: ResourceValue) {
-        drop(prev);
-    }
+    async fn delete<'a>(&self, prev: ResourceValue);
 }

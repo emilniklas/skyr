@@ -698,6 +698,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyr-file-system"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "async-trait",
+ "skyr",
+]
+
+[[package]]
 name = "skyr-list"
 version = "0.1.0"
 dependencies = [

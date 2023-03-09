@@ -1,16 +1,13 @@
 import List
 import Random
-
-identity = fn(x) => x
+import FileSystem
 
 id = Random.Identifier {
   name: "test"
-  byteLength: 3
+  byteLength: 5
 }
 
-debug List.first(
-  List.map(
-    List.map(["hello", id.hex], identity)
-    identity
-  )
-)
+FileSystem.File {
+  path: "my-file.txt"
+  content: id.hex
+}

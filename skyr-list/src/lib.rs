@@ -61,4 +61,8 @@ impl Plugin for List {
             ),
         ])
     }
+
+    fn find_resource(&self, _resource: &skyr::Resource) -> Option<Box<dyn skyr::PluginResource>> {
+        None
+    }
 }

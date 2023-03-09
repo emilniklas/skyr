@@ -645,6 +645,14 @@ impl Type {
         Self::List(Box::new(t))
     }
 
+    pub fn return_type(&self) -> &Type {
+        if let Type::Function(_, r) = self {
+            &*r
+        } else {
+            panic!("{:?} is not a function", self)
+        }
+    }
+
     fn pretty_fmt(&self, f: &mut fmt::Formatter, open_types: &mut Vec<TypeId>) -> fmt::Result {
         match self {
             Type::Void => write!(f, "Void"),

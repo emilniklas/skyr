@@ -26,6 +26,10 @@ impl ResourceId {
             id: id.into(),
         }
     }
+
+    pub fn has_type(&self, type_: &Type) -> bool {
+        &self.type_ == type_
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -87,6 +91,13 @@ pub struct Resource {
     pub state: ResourceValue,
 }
 
+impl Resource {
+    #[inline]
+    pub fn has_type(&self, type_: &Type) -> bool {
+        self.id.has_type(type_)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ResourceValue {
     Nil,
@@ -104,9 +115,7 @@ impl ResourceValue {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t.into())).collect())
     }
 
-    pub fn list(
-        i: impl IntoIterator<Item = impl Into<ResourceValue>>,
-    ) -> Self {
+    pub fn list(i: impl IntoIterator<Item = impl Into<ResourceValue>>) -> Self {
         Self::List(i.into_iter().map(|e| e.into()).collect())
     }
 
@@ -121,6 +130,25 @@ impl ResourceValue {
             r.push((name.into(), value.into()));
         } else {
             panic!("cannot set {} on {:?}", name, self);
+        }
+    }
+
+    pub fn access_member(&self, name: &str) -> &ResourceValue {
+        if let ResourceValue::Record(r) = self {
+            for (n, v) in r.iter() {
+                if n == name {
+                    return v;
+                }
+            }
+        }
+        panic!("cannot get member {} on {:?}", name, self);
+    }
+
+    pub fn as_str(&self) -> &str {
+        if let ResourceValue::String(s) = self {
+            s.as_str()
+        } else {
+            panic!("{:?} is not a string", self);
         }
     }
 }

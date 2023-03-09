@@ -64,6 +64,7 @@ impl ParsedProgram {
                 import_map,
                 modules: &self.modules,
                 table,
+                plugins: self.plugins.as_slice(),
             })
         }
     }
@@ -73,13 +74,14 @@ pub struct AnalyzedProgram<'a> {
     import_map: ImportMap<'a>,
     modules: &'a Vec<Module>,
     table: SymbolTable<'a>,
+    plugins: &'a [Box<dyn Plugin>],
 }
 
 impl<'a> AnalyzedProgram<'a> {
     pub async fn plan(&'a self, state: &'a State) -> Plan<'a> {
         let ctx = ExecutionContext::new(state, &self.table, self.import_map.clone());
 
-        let executor = Executor::new();
+        let executor = Executor::new(self.plugins);
         for module in self.modules {
             executor.execute_module(ctx.clone(), module).await;
         }

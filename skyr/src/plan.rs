@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use async_std::channel::Sender;
+use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
 
@@ -13,13 +14,13 @@ use crate::{AnalyzedProgram, Resource, ResourceId, ResourceValue, State};
 pub enum PlanStepKind<'a> {
     Create(
         Value<'a>,
-        Box<dyn 'a + Fn(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
+        Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
     ),
     Update(
         Value<'a>,
-        Box<dyn 'a + Fn(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
+        Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
     ),
-    Delete(Box<dyn 'a + Fn(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>>),
+    Delete(Box<dyn 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>>),
 }
 
 #[derive(Default)]
@@ -66,7 +67,7 @@ impl<'a> Plan<'a> {
         &mut self,
         id: ResourceId,
         args: Value<'a>,
-        f: impl 'a + Fn(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
+        f: impl 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Create(args, Box::new(f))));
@@ -76,7 +77,7 @@ impl<'a> Plan<'a> {
         &mut self,
         id: ResourceId,
         args: Value<'a>,
-        f: impl 'a + Fn(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
+        f: impl 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Update(args, Box::new(f))));
@@ -85,7 +86,7 @@ impl<'a> Plan<'a> {
     pub fn register_delete(
         &mut self,
         id: ResourceId,
-        f: impl 'a + Fn(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>,
+        f: impl 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>,
     ) {
         self.steps.push((id, PlanStepKind::Delete(Box::new(f))));
     }
@@ -104,7 +105,7 @@ impl<'a> Plan<'a> {
         let before_all = Instant::now();
         for (id, kind) in self.steps {
             let start = Instant::now();
-            let (tx, mut rx) = futures::channel::oneshot::channel::<()>();
+            let (tx, rx) = futures::channel::oneshot::channel::<()>();
             fo.push({
                 let id = id.clone();
                 let mut event = match &kind {
@@ -114,21 +115,31 @@ impl<'a> Plan<'a> {
                 };
                 let events_tx = events_tx.clone();
                 Box::pin(async move {
-                    let mut first = true;
-                    while rx.try_recv().is_ok() {
-                        if !first {
-                            match &mut event {
-                                PlanExecutionEvent::Creating(_, d)
-                                | PlanExecutionEvent::Updating(_, d)
-                                | PlanExecutionEvent::Deleting(_, d) => {
-                                    *d = Instant::now().duration_since(start)
-                                }
-                                _ => {}
+                    let mut done = Box::pin(rx);
+                    loop {
+                        match futures::future::select(
+                            Box::pin(async {
+                                async_std::task::sleep(Duration::from_secs(2)).await;
+                            }),
+                            done,
+                        )
+                        .await
+                        {
+                            Either::Left((_, l)) => {
+                                done = l;
                             }
-                            events_tx.send(event.clone()).await.unwrap_or(());
+                            Either::Right(_) => break,
                         }
-                        first = false;
-                        async_std::task::sleep(Duration::from_secs(2)).await;
+
+                        match &mut event {
+                            PlanExecutionEvent::Creating(_, d)
+                            | PlanExecutionEvent::Updating(_, d)
+                            | PlanExecutionEvent::Deleting(_, d) => {
+                                *d = Instant::now().duration_since(start)
+                            }
+                            _ => {}
+                        }
+                        events_tx.send(event.clone()).await.unwrap_or(());
                     }
                 })
             });

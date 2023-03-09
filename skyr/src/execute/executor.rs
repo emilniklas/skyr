@@ -11,7 +11,7 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
-use crate::{compile::*, Resource, ResourceId};
+use crate::{compile::*, Plugin, Resource, ResourceId};
 use crate::{Plan, ResourceValue};
 use crate::{PluginResource, State};
 
@@ -63,16 +63,21 @@ impl<'a> ExecutionContext<'a> {
     }
 }
 
-#[derive(Default)]
 pub struct Executor<'a> {
     plan: RwLock<Plan<'a>>,
     used_resources: RwLock<BTreeSet<ResourceId>>,
     is_pending: AtomicBool,
+    plugins: &'a [Box<dyn Plugin>],
 }
 
 impl<'a> Executor<'a> {
-    pub fn new() -> Self {
-        Executor::default()
+    pub fn new(plugins: &'a [Box<dyn Plugin>]) -> Self {
+        Executor {
+            plan: Default::default(),
+            used_resources: Default::default(),
+            is_pending: Default::default(),
+            plugins,
+        }
     }
 
     pub fn finalize(self, state: &'a State) -> Plan<'a> {
@@ -81,8 +86,19 @@ impl<'a> Executor<'a> {
         if !self.is_pending.into_inner() {
             let used = self.used_resources.into_inner();
 
-            for resource in state.all_not_in(&used) {
-                plan.register_delete(resource.id, |_, _| Box::pin(async {}));
+            'resources: for resource in state.all_not_in(&used) {
+                for plugin in self.plugins.iter() {
+                    if let Some(plugin_resource) = plugin.find_resource(&resource) {
+                        plan.register_delete(resource.id.clone(), move |_, _| {
+                            Box::pin(async move {
+                                plugin_resource.delete(resource.state.clone()).await;
+                            })
+                        });
+                        continue 'resources;
+                    }
+                }
+
+                panic!("no plugin took ownership of {:?}", &resource);
             }
         }
 

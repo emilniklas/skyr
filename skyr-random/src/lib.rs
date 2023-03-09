@@ -22,6 +22,14 @@ impl Plugin for Random {
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> Value<'a> {
         Value::record([("Identifier", Value::resource(ctx, Identifier))])
     }
+
+    fn find_resource(&self, resource: &skyr::Resource) -> Option<Box<dyn PluginResource>> {
+        if resource.has_type(&Identifier.type_().return_type()) {
+            Some(Box::new(Identifier))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -56,16 +64,20 @@ impl PluginResource for Identifier {
         self.update(arg, record).await
     }
 
+    async fn read<'a>(&self, prev: ResourceValue) -> ResourceValue {
+        prev
+    }
+
     async fn update<'a>(&self, arg: Value<'a>, mut prev: ResourceValue) -> ResourceValue {
         let mut v = vec![0u8; arg.access_member("byteLength").as_usize()];
         rand::thread_rng().fill_bytes(&mut v);
         prev.set_member(
             "hex",
-            v.iter()
-                .map(|c| format!("{:x}", c))
-                .collect::<String>(),
+            v.iter().map(|c| format!("{:x}", c)).collect::<String>(),
         );
         prev.set_member("bytes", ResourceValue::list(v));
         prev
     }
+
+    async fn delete<'a>(&self, _prev: ResourceValue) {}
 }
