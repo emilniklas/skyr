@@ -20,7 +20,9 @@ pub enum PlanStepKind<'a> {
         Value<'a>,
         Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
     ),
-    Delete(Box<dyn 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>>),
+    Delete(
+        Box<dyn 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>>,
+    ),
 }
 
 #[derive(Default)]
@@ -95,12 +97,7 @@ impl<'a> Plan<'a> {
         self.debug_messages.push((span, value));
     }
 
-    pub async fn execute(
-        self,
-        program: &'a AnalyzedProgram<'a>,
-        state: &'a State,
-        events_tx: Sender<PlanExecutionEvent>,
-    ) -> Plan<'a> {
+    pub async fn execute_once(self, state: &'a State, events_tx: Sender<PlanExecutionEvent>) {
         let fo = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
         let before_all = Instant::now();
         for (id, kind) in self.steps {
@@ -189,6 +186,15 @@ impl<'a> Plan<'a> {
             ))
             .await
             .unwrap_or(());
+    }
+
+    pub async fn execute(
+        self,
+        program: &'a AnalyzedProgram<'a>,
+        state: &'a State,
+        events_tx: Sender<PlanExecutionEvent>,
+    ) -> Plan<'a> {
+        self.execute_once(state, events_tx).await;
 
         let mut plan = program.plan(&state).await;
         plan.is_continuation = true;

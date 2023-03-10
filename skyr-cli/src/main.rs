@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use async_std::stream::StreamExt;
 use clap::Parser;
 use glob;
-use skyr::{Plugin, Source, State};
+use skyr::{Plan, Plugin, Source, State};
 
 #[derive(Parser)]
 struct SkyrCli {
@@ -18,6 +18,10 @@ enum Command {
         #[clap(long = "approve", short = 'y')]
         approve: bool,
     },
+    Teardown {
+        #[clap(long = "approve", short = 'y')]
+        approve: bool,
+    },
     Plan,
     #[clap(subcommand)]
     State(StateCommand),
@@ -25,7 +29,7 @@ enum Command {
 
 #[derive(Parser)]
 enum StateCommand {
-    Inspect
+    Inspect,
 }
 
 #[async_std::main]
@@ -48,9 +52,66 @@ async fn main() -> io::Result<ExitCode> {
 
     match command {
         Command::Apply { approve } => apply(approve, plugins).await,
+        Command::Teardown { approve } => teardown(approve, plugins).await,
         Command::Plan => plan(plugins).await,
         Command::State(StateCommand::Inspect) => inspect_state().await,
     }
+}
+
+async fn teardown(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {
+    let state = state().await;
+
+    let mut plan = Plan::new();
+
+    'resources: for resource in state.all_not_in(&Default::default()) {
+        for plugin in plugins.iter() {
+            if let Some(plugin_resource) = plugin.find_resource(&resource) {
+                plan.register_delete(resource.id.clone(), move |_, _| {
+                    Box::pin(async move {
+                        plugin_resource.delete(resource.state.clone()).await;
+                    })
+                });
+                continue 'resources;
+            }
+        }
+
+        panic!("no plugin took ownership of {:?}", &resource);
+    }
+
+    println!("{:?}", plan);
+
+    let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
+    if !approve {
+        print!("\nContinue? ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        stdin.read_line(&mut line)?;
+
+        if line != "yes\n" {
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+
+    let (tx, mut rx) = async_std::channel::unbounded();
+
+    let join = async_std::task::spawn(async move {
+        while let Some(event) = rx.next().await {
+            println!("{:?}", event);
+        }
+    });
+
+    plan.execute_once(&state, tx).await;
+
+    join.await;
+
+    state.save(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(".skyr.state")?,
+    )?;
+
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn sources() -> io::Result<Vec<Source>> {

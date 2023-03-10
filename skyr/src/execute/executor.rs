@@ -417,6 +417,14 @@ impl<'a> Executor<'a> {
                             }
 
                             (
+                                Value::String(mut lhs),
+                                BinaryOperatorKind::Plus,
+                                Value::String(rhs),
+                            ) => Value::String({
+                                lhs.push_str(&rhs);
+                                lhs
+                            }),
+                            (
                                 Value::String(lhs),
                                 BinaryOperatorKind::EqualTo,
                                 Value::String(rhs),
