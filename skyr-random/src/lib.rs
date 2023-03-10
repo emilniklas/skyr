@@ -1,3 +1,5 @@
+use std::io;
+
 use skyr::export_plugin;
 
 export_plugin!(Random);
@@ -58,17 +60,21 @@ impl PluginResource for Identifier {
         arg.access_member("name").as_str().into()
     }
 
-    async fn create<'a>(&self, arg: Value<'a>) -> ResourceValue {
+    async fn create<'a>(&self, arg: Value<'a>) -> io::Result<ResourceValue> {
         let record = ResourceValue::record([("name", arg.access_member("name").as_str())]);
 
         self.update(arg, record).await
     }
 
-    async fn read<'a>(&self, prev: ResourceValue) -> ResourceValue {
-        prev
+    async fn read<'a>(&self, prev: ResourceValue, _arg: &mut ResourceValue) -> io::Result<Option<ResourceValue>> {
+        Ok(Some(prev))
     }
 
-    async fn update<'a>(&self, arg: Value<'a>, mut prev: ResourceValue) -> ResourceValue {
+    async fn update<'a>(
+        &self,
+        arg: Value<'a>,
+        mut prev: ResourceValue,
+    ) -> io::Result<ResourceValue> {
         let mut v = vec![0u8; arg.access_member("byteLength").as_usize()];
         rand::thread_rng().fill_bytes(&mut v);
         prev.set_member(
@@ -76,8 +82,10 @@ impl PluginResource for Identifier {
             v.iter().map(|c| format!("{:x}", c)).collect::<String>(),
         );
         prev.set_member("bytes", ResourceValue::list(v));
-        prev
+        Ok(prev)
     }
 
-    async fn delete<'a>(&self, _prev: ResourceValue) {}
+    async fn delete<'a>(&self, _prev: ResourceValue) -> io::Result<()> {
+        Ok(())
+    }
 }

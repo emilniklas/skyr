@@ -1,3 +1,5 @@
+use std::io;
+
 use async_std::fs::OpenOptions;
 use async_std::io::{ReadExt, WriteExt};
 use skyr::export_plugin;
@@ -58,59 +60,69 @@ impl PluginResource for File {
         arg.access_member("path").as_str().into()
     }
 
-    async fn create<'a>(&self, arg: Value<'a>) -> ResourceValue {
+    async fn create<'a>(&self, arg: Value<'a>) -> io::Result<ResourceValue> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(arg.access_member("path").as_str())
-            .await
-            .unwrap();
+            .await?;
 
         let bytes = arg.access_member("content").as_str().as_bytes();
-        file.write_all(bytes).await.unwrap();
+        file.write_all(bytes).await?;
 
         let bytes = ResourceValue::list(bytes.iter().copied());
 
         let mut v: ResourceValue = arg.into();
         v.set_member("bytes", bytes);
-        v
+        Ok(v)
     }
 
-    async fn read<'a>(&self, mut value: ResourceValue) -> ResourceValue {
-        let mut file = OpenOptions::new()
+    async fn read<'a>(
+        &self,
+        mut value: ResourceValue,
+        arg: &mut ResourceValue,
+    ) -> io::Result<Option<ResourceValue>> {
+        let mut file = match OpenOptions::new()
             .read(true)
             .open(value.access_member("path").as_str())
             .await
-            .unwrap();
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
 
         let mut bytes = vec![];
-        file.read_to_end(&mut bytes).await.unwrap();
+        file.read_to_end(&mut bytes).await?;
 
-        value.set_member("content", String::from_utf8_lossy(&bytes).to_string());
+        let content = String::from_utf8_lossy(&bytes).to_string();
+
+        arg.set_member("content", content.as_str());
+        value.set_member("content", content);
         value.set_member("bytes", ResourceValue::list(bytes));
-        value
+        Ok(Some(value))
     }
 
-    async fn update<'a>(&self, arg: Value<'a>, _prev: ResourceValue) -> ResourceValue {
+    async fn update<'a>(&self, arg: Value<'a>, _prev: ResourceValue) -> io::Result<ResourceValue> {
         let mut file = OpenOptions::new()
             .write(true)
+            .truncate(true)
             .open(arg.access_member("path").as_str())
-            .await
-            .unwrap();
+            .await?;
 
-        let bytes = arg.access_member("content").as_str().as_bytes();
-        file.write_all(bytes).await.unwrap();
+        let content = arg.access_member("content").as_str().to_string();
+        let bytes = content.as_bytes();
+        file.write_all(bytes).await?;
 
         let bytes = ResourceValue::list(bytes.iter().copied());
 
         let mut v: ResourceValue = arg.into();
+        v.set_member("content", content);
         v.set_member("bytes", bytes);
-        v
+        Ok(v)
     }
 
-    async fn delete<'a>(&self, prev: ResourceValue) {
-        async_std::fs::remove_file(prev.access_member("path").as_str())
-            .await
-            .unwrap();
+    async fn delete<'a>(&self, prev: ResourceValue) -> io::Result<()> {
+        async_std::fs::remove_file(prev.access_member("path").as_str()).await
     }
 }

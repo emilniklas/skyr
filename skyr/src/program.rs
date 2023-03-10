@@ -1,7 +1,7 @@
 use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
-use crate::{Plan, Plugin, Source, State};
+use crate::{Plan, Plugin, ResourceError, Source, State};
 
 pub struct Program {
     sources: Vec<Source>,
@@ -78,7 +78,7 @@ pub struct AnalyzedProgram<'a> {
 }
 
 impl<'a> AnalyzedProgram<'a> {
-    pub async fn plan(&'a self, state: &'a State) -> Plan<'a> {
+    pub async fn plan(&'a self, state: &'a State) -> Result<Plan<'a>, Vec<ResourceError>> {
         let ctx = ExecutionContext::new(state, &self.table, self.import_map.clone());
 
         let executor = Executor::new(self.plugins);

@@ -11,7 +11,7 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
-use crate::{compile::*, Plugin, Resource, ResourceId, DisplayAsDebug};
+use crate::{compile::*, DisplayAsDebug, Plugin, Resource, ResourceError, ResourceId};
 use crate::{Plan, ResourceValue};
 use crate::{PluginResource, State};
 
@@ -68,6 +68,7 @@ pub struct Executor<'a> {
     used_resources: RwLock<BTreeSet<ResourceId>>,
     is_pending: AtomicBool,
     plugins: &'a [Box<dyn Plugin>],
+    read_errors: RwLock<Vec<ResourceError>>,
 }
 
 impl<'a> Executor<'a> {
@@ -77,10 +78,16 @@ impl<'a> Executor<'a> {
             used_resources: Default::default(),
             is_pending: Default::default(),
             plugins,
+            read_errors: Default::default(),
         }
     }
 
-    pub fn finalize(self, state: &'a State) -> Plan<'a> {
+    pub fn finalize(self, state: &'a State) -> Result<Plan<'a>, Vec<ResourceError>> {
+        let read_errors = self.read_errors.into_inner();
+        if !read_errors.is_empty() {
+            return Err(read_errors);
+        }
+
         let mut plan = self.plan.into_inner();
 
         if !self.is_pending.into_inner() {
@@ -91,7 +98,8 @@ impl<'a> Executor<'a> {
                     if let Some(plugin_resource) = plugin.find_resource(&resource) {
                         plan.register_delete(resource.id.clone(), move |_, _| {
                             Box::pin(async move {
-                                plugin_resource.delete(resource.state.clone()).await;
+                                plugin_resource.delete(resource.state.clone()).await?;
+                                Ok(())
                             })
                         });
                         continue 'resources;
@@ -102,7 +110,7 @@ impl<'a> Executor<'a> {
             }
         }
 
-        plan
+        Ok(plan)
     }
 
     pub fn execute_module(
@@ -425,6 +433,14 @@ impl<'a> Executor<'a> {
                                 lhs
                             }),
                             (
+                                Value::String(mut lhs),
+                                BinaryOperatorKind::Plus,
+                                Value::Integer(rhs),
+                            ) => Value::String({
+                                lhs.push_str(&format!("{}", rhs));
+                                lhs
+                            }),
+                            (
                                 Value::String(lhs),
                                 BinaryOperatorKind::EqualTo,
                                 Value::String(rhs),
@@ -467,6 +483,26 @@ impl<'a> Executor<'a> {
                 executor.execute_block(ctx, &function.body).await
             })
         }))
+    }
+
+    async fn register_create(
+        &self,
+        resource: impl PluginResource + 'a,
+        id: ResourceId,
+        args: Vec<Value<'a>>,
+    ) {
+        let mut plan = self.plan.write().await;
+        plan.register_create(id.clone(), args[0].clone(), {
+            move |id, arg| {
+                Box::pin(async move {
+                    Ok(Resource {
+                        id,
+                        arg: arg.clone().into(),
+                        state: resource.create(arg).await?,
+                    })
+                })
+            }
+        });
     }
 }
 
@@ -694,45 +730,52 @@ impl<'a> Value<'a> {
 
             let id = r.resource_id(&args[0]);
             Box::pin(async move {
-                let r = r.clone();
                 match ctx.state.get(&id) {
                     None => {
-                        let mut plan = executor.plan.write().await;
-                        plan.register_create(id.clone(), args[0].clone(), {
-                            move |id, arg| {
-                                let r = r.clone();
-                                Box::pin(async move {
-                                    Resource {
-                                        id,
-                                        arg: arg.clone().into(),
-                                        state: r.create(arg).await,
-                                    }
-                                })
-                            }
-                        });
+                        executor.register_create(r, id.clone(), args).await;
                         Value::Pending(vec![id])
                     }
                     Some(mut resource) => {
-                        resource.state = r.read(resource.state).await;
-
                         executor
                             .used_resources
                             .write()
                             .await
                             .insert(resource.id.clone());
 
+                        resource.state = match r.read(resource.state, &mut resource.arg).await {
+                            Ok(Some(s)) => s,
+                            Ok(None) => {
+                                executor.register_create(r, id.clone(), args).await;
+                                return Value::Pending(vec![id]);
+                            }
+                            Err(e) => {
+                                executor
+                                    .read_errors
+                                    .write()
+                                    .await
+                                    .push(ResourceError(resource.id, e));
+                                return Value::Pending(vec![id]);
+                            }
+                        };
+
                         if resource.arg != args[0].clone().into() {
                             let mut plan = executor.plan.write().await;
-                            plan.register_update(id.clone(), resource.arg.clone(), args[0].clone(), {
-                                move |_id, new_arg| {
-                                    let r = r.clone();
-                                    Box::pin(async move {
-                                        resource.arg = new_arg.clone().into();
-                                        resource.state = r.update(new_arg, resource.state).await;
-                                        resource
-                                    })
-                                }
-                            });
+                            plan.register_update(
+                                id.clone(),
+                                resource.arg.clone(),
+                                args[0].clone(),
+                                {
+                                    move |_id, new_arg| {
+                                        let r = r.clone();
+                                        Box::pin(async move {
+                                            resource.arg = new_arg.clone().into();
+                                            resource.state =
+                                                r.update(new_arg, resource.state).await?;
+                                            Ok(resource)
+                                        })
+                                    }
+                                },
+                            );
                             return Value::Pending(vec![id]);
                         }
 

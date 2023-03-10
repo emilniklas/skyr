@@ -1,3 +1,5 @@
+use std::io;
+
 use crate::analyze::Type;
 use crate::execute::{ExecutionContext, Value};
 use crate::{Resource, ResourceId, ResourceValue};
@@ -45,11 +47,15 @@ pub trait PluginResource {
 
     fn id<'a>(&self, arg: &Value<'a>) -> String;
 
-    async fn create<'a>(&self, arg: Value<'a>) -> ResourceValue;
+    async fn create<'a>(&self, arg: Value<'a>) -> io::Result<ResourceValue>;
 
-    async fn read<'a>(&self, prev: ResourceValue) -> ResourceValue;
+    async fn read<'a>(
+        &self,
+        prev: ResourceValue,
+        arg: &mut ResourceValue,
+    ) -> io::Result<Option<ResourceValue>>;
 
-    async fn update<'a>(&self, arg: Value<'a>, prev: ResourceValue) -> ResourceValue;
+    async fn update<'a>(&self, arg: Value<'a>, prev: ResourceValue) -> io::Result<ResourceValue>;
 
-    async fn delete<'a>(&self, prev: ResourceValue);
+    async fn delete<'a>(&self, prev: ResourceValue) -> io::Result<()>;
 }

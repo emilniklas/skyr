@@ -68,7 +68,8 @@ async fn teardown(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<Ex
             if let Some(plugin_resource) = plugin.find_resource(&resource) {
                 plan.register_delete(resource.id.clone(), move |_, _| {
                     Box::pin(async move {
-                        plugin_resource.delete(resource.state.clone()).await;
+                        plugin_resource.delete(resource.state.clone()).await?;
+                        Ok(())
                     })
                 });
                 continue 'resources;
@@ -100,7 +101,11 @@ async fn teardown(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<Ex
         }
     });
 
-    plan.execute_once(&state, tx).await;
+    if let Err(e) = plan.execute_once(&state, tx).await {
+        println!("{:?}", e);
+        join.await;
+        return Ok(ExitCode::FAILURE);
+    }
 
     join.await;
 
@@ -165,7 +170,13 @@ async fn plan(plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {
         .analyze()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    let plan = program.plan(&state).await;
+    let plan = match program.plan(&state).await {
+        Ok(p) => p,
+        Err(errors) => {
+            println!("{:?}", errors);
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     println!("{:?}", plan);
 
     if !plan.is_empty() {
@@ -188,7 +199,13 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
     let mut exit_code = ExitCode::SUCCESS;
     {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
-        let mut plan = program.plan(&state).await;
+        let mut plan = match program.plan(&state).await {
+            Ok(p)=>p,
+            Err(e) => {
+                println!("{:?}", e);
+                return Ok(ExitCode::FAILURE);
+            }
+        };
 
         println!("{:?}", plan);
 
@@ -213,7 +230,14 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
                 }
             });
 
-            plan = plan.execute(&program, &state, tx).await;
+            plan = match plan.execute(&program, &state, tx).await {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("{:?}", e);
+                    exit_code = ExitCode::FAILURE;
+                    break;
+                }
+            };
 
             join.await;
 

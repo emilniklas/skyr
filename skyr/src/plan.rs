@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -11,18 +12,39 @@ use crate::compile::Span;
 use crate::execute::Value;
 use crate::{AnalyzedProgram, Resource, ResourceId, ResourceValue, State};
 
+#[derive(Debug)]
+pub struct ResourceError(pub ResourceId, pub io::Error);
+
 pub enum PlanStepKind<'a> {
     Create(
         Value<'a>,
-        Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
+        Box<
+            dyn 'a
+                + FnOnce(
+                    ResourceId,
+                    Value<'a>,
+                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
+        >,
     ),
     Update(
         ResourceValue,
         Value<'a>,
-        Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
+        Box<
+            dyn 'a
+                + FnOnce(
+                    ResourceId,
+                    Value<'a>,
+                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
+        >,
     ),
     Delete(
-        Box<dyn 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>>,
+        Box<
+            dyn 'a
+                + FnOnce(
+                    ResourceId,
+                    ResourceValue,
+                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
+        >,
     ),
 }
 
@@ -53,7 +75,9 @@ impl<'a> fmt::Debug for Plan<'a> {
             }
             match kind {
                 PlanStepKind::Create(value, _) => write!(f, "✴️ Create {:?} {:#?}", id, value)?,
-                PlanStepKind::Update(old, value, _) => write!(f, "⬆️ Update {:?} {:#?}", id, old.diff(value))?,
+                PlanStepKind::Update(old, value, _) => {
+                    write!(f, "⬆️ Update {:?} {:#?}", id, old.diff(value))?
+                }
                 PlanStepKind::Delete(_) => write!(f, "🚨 Delete {:?}", id)?,
             }
         }
@@ -70,7 +94,11 @@ impl<'a> Plan<'a> {
         &mut self,
         id: ResourceId,
         args: Value<'a>,
-        f: impl 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
+        f: impl 'a
+            + FnOnce(
+                ResourceId,
+                Value<'a>,
+            ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Create(args, Box::new(f))));
@@ -81,7 +109,11 @@ impl<'a> Plan<'a> {
         id: ResourceId,
         old_args: ResourceValue,
         args: Value<'a>,
-        f: impl 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
+        f: impl 'a
+            + FnOnce(
+                ResourceId,
+                Value<'a>,
+            ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Update(old_args, args, Box::new(f))));
@@ -90,7 +122,8 @@ impl<'a> Plan<'a> {
     pub fn register_delete(
         &mut self,
         id: ResourceId,
-        f: impl 'a + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = ()>>>,
+        f: impl 'a
+            + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
     ) {
         self.steps.push((id, PlanStepKind::Delete(Box::new(f))));
     }
@@ -99,8 +132,13 @@ impl<'a> Plan<'a> {
         self.debug_messages.push((span, value));
     }
 
-    pub async fn execute_once(self, state: &'a State, events_tx: Sender<PlanExecutionEvent>) {
-        let fo = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
+    pub async fn execute_once(
+        self,
+        state: &'a State,
+        events_tx: Sender<PlanExecutionEvent>,
+    ) -> Result<(), Vec<ResourceError>> {
+        let fo =
+            FuturesUnordered::<Pin<Box<dyn Future<Output = Result<(), ResourceError>>>>>::new();
         let before_all = Instant::now();
         for (id, kind) in self.steps {
             let start = Instant::now();
@@ -109,7 +147,9 @@ impl<'a> Plan<'a> {
                 let id = id.clone();
                 let mut event = match &kind {
                     PlanStepKind::Create(_, _) => PlanExecutionEvent::Creating(id, Duration::ZERO),
-                    PlanStepKind::Update(_, _, _) => PlanExecutionEvent::Updating(id, Duration::ZERO),
+                    PlanStepKind::Update(_, _, _) => {
+                        PlanExecutionEvent::Updating(id, Duration::ZERO)
+                    }
                     PlanStepKind::Delete(_) => PlanExecutionEvent::Deleting(id, Duration::ZERO),
                 };
                 let events_tx = events_tx.clone();
@@ -140,12 +180,17 @@ impl<'a> Plan<'a> {
                         }
                         events_tx.send(event.clone()).await.unwrap_or(());
                     }
+                    Ok(())
                 })
             });
             let events_tx = events_tx.clone();
             match kind {
                 PlanStepKind::Create(arg, f) => fo.push(Box::pin(async move {
-                    state.insert(f(id.clone(), arg).await);
+                    state.insert(
+                        f(id.clone(), arg)
+                            .await
+                            .map_err(|e| ResourceError(id.clone(), e))?,
+                    );
                     drop(tx);
                     events_tx
                         .send(PlanExecutionEvent::Created(
@@ -154,9 +199,14 @@ impl<'a> Plan<'a> {
                         ))
                         .await
                         .unwrap_or(());
+                    Ok(())
                 })),
                 PlanStepKind::Update(_, arg, f) => fo.push(Box::pin(async move {
-                    state.insert(f(id.clone(), arg).await);
+                    state.insert(
+                        f(id.clone(), arg)
+                            .await
+                            .map_err(|e| ResourceError(id.clone(), e))?,
+                    );
                     drop(tx);
                     events_tx
                         .send(PlanExecutionEvent::Updated(
@@ -165,10 +215,13 @@ impl<'a> Plan<'a> {
                         ))
                         .await
                         .unwrap_or(());
+                    Ok(())
                 })),
                 PlanStepKind::Delete(f) => fo.push(Box::pin(async move {
                     if let Some(resource) = state.remove(&id) {
-                        f(id.clone(), resource.state).await;
+                        f(id.clone(), resource.state)
+                            .await
+                            .map_err(|e| ResourceError(resource.id, e))?;
                     }
                     drop(tx);
                     events_tx
@@ -178,16 +231,27 @@ impl<'a> Plan<'a> {
                         ))
                         .await
                         .unwrap_or(());
+                    Ok(())
                 })),
             }
         }
-        fo.collect::<Vec<_>>().await;
+        let results = fo.collect::<Vec<Result<(), ResourceError>>>().await;
         events_tx
             .send(PlanExecutionEvent::Done(
                 Instant::now().duration_since(before_all),
             ))
             .await
             .unwrap_or(());
+
+        let errors = results
+            .into_iter()
+            .filter_map(|r| r.err())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     pub async fn execute(
@@ -195,12 +259,12 @@ impl<'a> Plan<'a> {
         program: &'a AnalyzedProgram<'a>,
         state: &'a State,
         events_tx: Sender<PlanExecutionEvent>,
-    ) -> Plan<'a> {
-        self.execute_once(state, events_tx).await;
+    ) -> Result<Plan<'a>, Vec<ResourceError>> {
+        self.execute_once(state, events_tx).await?;
 
-        let mut plan = program.plan(&state).await;
+        let mut plan = program.plan(&state).await?;
         plan.is_continuation = true;
-        plan
+        Ok(plan)
     }
 
     pub fn is_empty(&self) -> bool {
