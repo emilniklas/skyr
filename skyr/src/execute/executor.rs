@@ -11,7 +11,7 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
-use crate::{compile::*, Plugin, Resource, ResourceId};
+use crate::{compile::*, Plugin, Resource, ResourceId, DisplayAsDebug};
 use crate::{Plan, ResourceValue};
 use crate::{PluginResource, State};
 
@@ -723,9 +723,8 @@ impl<'a> Value<'a> {
 
                         if resource.arg != args[0].clone().into() {
                             let mut plan = executor.plan.write().await;
-                            plan.register_update(id.clone(), args[0].clone(), {
+                            plan.register_update(id.clone(), resource.arg.clone(), args[0].clone(), {
                                 move |_id, new_arg| {
-                                    let mut resource = resource.clone();
                                     let r = r.clone();
                                     Box::pin(async move {
                                         resource.arg = new_arg.clone().into();
@@ -848,14 +847,6 @@ enum DeferredState<'a> {
         >,
     ),
     Resolved(Value<'a>),
-}
-
-struct DisplayAsDebug<T>(T);
-
-impl<T: fmt::Display> fmt::Debug for DisplayAsDebug<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
 }
 
 impl<'a> From<ResourceValue> for Value<'a> {

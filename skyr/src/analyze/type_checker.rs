@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use serde::{Deserialize, Serialize};
 
-use crate::compile::*;
+use crate::{compile::*, DisplayAsDebug};
 
 use super::{Declaration, External, ImportMap, SymbolTable};
 
@@ -711,13 +711,5 @@ impl Default for Type {
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.pretty_fmt(f, &mut vec![])
-    }
-}
-
-struct DisplayAsDebug<T>(T);
-
-impl<T: fmt::Display> fmt::Debug for DisplayAsDebug<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
     }
 }

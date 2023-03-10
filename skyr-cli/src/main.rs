@@ -104,12 +104,7 @@ async fn teardown(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<Ex
 
     join.await;
 
-    state.save(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(".skyr.state")?,
-    )?;
+    save_state(state).await?;
 
     Ok(ExitCode::SUCCESS)
 }
@@ -129,11 +124,26 @@ async fn sources() -> io::Result<Vec<Source>> {
     sources.into_iter().collect::<io::Result<Vec<_>>>()
 }
 
+const STATEFILE: &'static str = ".skyr.state";
+
 async fn state() -> State {
-    async_std::fs::read(".skyr.state")
+    async_std::fs::read(STATEFILE)
         .await
         .and_then(|s| skyr::State::open(s.as_slice()))
         .unwrap_or_default()
+}
+
+async fn save_state(state: State) -> io::Result<()> {
+    if state.is_empty() {
+        std::fs::remove_file(STATEFILE)
+    } else {
+        state.save(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(STATEFILE)?,
+        )
+    }
 }
 
 async fn inspect_state() -> io::Result<ExitCode> {
@@ -211,12 +221,7 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
         }
     }
 
-    state.save(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(".skyr.state")?,
-    )?;
+    save_state(state).await?;
 
     Ok(exit_code)
 }

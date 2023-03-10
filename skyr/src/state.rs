@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analyze::Type;
 use crate::execute::Value;
+use crate::{Diff, DisplayAsDebug};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceId {
@@ -48,6 +49,10 @@ impl State {
 
     pub fn save(self, writer: impl io::Write) -> io::Result<()> {
         bincode::serialize_into(writer, &self).map_err(Self::bincode_to_io_error)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resources.read().unwrap().is_empty()
     }
 
     fn bincode_to_io_error(e: bincode::Error) -> io::Error {
@@ -98,7 +103,7 @@ impl Resource {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub enum ResourceValue {
     Nil,
     String(String),
@@ -151,6 +156,10 @@ impl ResourceValue {
             panic!("{:?} is not a string", self);
         }
     }
+
+    pub fn diff<'v, 'a>(&'v self, value: &'v Value<'a>) -> Diff<'v, 'a> {
+        Diff::calculate(self, value)
+    }
 }
 
 impl From<&str> for ResourceValue {
@@ -189,6 +198,31 @@ impl From<Value<'_>> for ResourceValue {
             }
             Value::List(l) => ResourceValue::List(l.into_iter().map(|e| e.into()).collect()),
             _ => panic!("cannot derive a resource value from {:?}", value),
+        }
+    }
+}
+
+impl fmt::Debug for ResourceValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResourceValue::Nil => write!(f, "<nil>"),
+            ResourceValue::String(s) => s.fmt(f),
+            ResourceValue::Integer(i) => i.fmt(f),
+            ResourceValue::Boolean(b) => b.fmt(f),
+            ResourceValue::Record(r) => {
+                let mut m = f.debug_map();
+                for (n, d) in r {
+                    m.entry(&DisplayAsDebug(n), d);
+                }
+                m.finish()
+            }
+            ResourceValue::List(l) => {
+                let mut m = f.debug_list();
+                for d in l {
+                    m.entry(d);
+                }
+                m.finish()
+            }
         }
     }
 }

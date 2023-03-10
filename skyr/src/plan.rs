@@ -17,6 +17,7 @@ pub enum PlanStepKind<'a> {
         Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
     ),
     Update(
+        ResourceValue,
         Value<'a>,
         Box<dyn 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>>,
     ),
@@ -52,7 +53,7 @@ impl<'a> fmt::Debug for Plan<'a> {
             }
             match kind {
                 PlanStepKind::Create(value, _) => write!(f, "✴️ Create {:?} {:#?}", id, value)?,
-                PlanStepKind::Update(value, _) => write!(f, "⬆️ Update {:?} {:#?}", id, value)?,
+                PlanStepKind::Update(old, value, _) => write!(f, "⬆️ Update {:?} {:#?}", id, old.diff(value))?,
                 PlanStepKind::Delete(_) => write!(f, "🚨 Delete {:?}", id)?,
             }
         }
@@ -78,11 +79,12 @@ impl<'a> Plan<'a> {
     pub fn register_update(
         &mut self,
         id: ResourceId,
+        old_args: ResourceValue,
         args: Value<'a>,
         f: impl 'a + FnOnce(ResourceId, Value<'a>) -> Pin<Box<dyn 'a + Future<Output = Resource>>>,
     ) {
         self.steps
-            .push((id, PlanStepKind::Update(args, Box::new(f))));
+            .push((id, PlanStepKind::Update(old_args, args, Box::new(f))));
     }
 
     pub fn register_delete(
@@ -107,7 +109,7 @@ impl<'a> Plan<'a> {
                 let id = id.clone();
                 let mut event = match &kind {
                     PlanStepKind::Create(_, _) => PlanExecutionEvent::Creating(id, Duration::ZERO),
-                    PlanStepKind::Update(_, _) => PlanExecutionEvent::Updating(id, Duration::ZERO),
+                    PlanStepKind::Update(_, _, _) => PlanExecutionEvent::Updating(id, Duration::ZERO),
                     PlanStepKind::Delete(_) => PlanExecutionEvent::Deleting(id, Duration::ZERO),
                 };
                 let events_tx = events_tx.clone();
@@ -153,7 +155,7 @@ impl<'a> Plan<'a> {
                         .await
                         .unwrap_or(());
                 })),
-                PlanStepKind::Update(arg, f) => fo.push(Box::pin(async move {
+                PlanStepKind::Update(_, arg, f) => fo.push(Box::pin(async move {
                     state.insert(f(id.clone(), arg).await);
                     drop(tx);
                     events_tx
