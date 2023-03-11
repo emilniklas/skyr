@@ -1,15 +1,16 @@
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
-use skyr::{export_plugin, known};
+use skyr::{export_plugin, known, Collection, Primitive};
 
 export_plugin!(List);
 
 use skyr::analyze::Type;
-use skyr::execute::{ExecutionContext, Value};
+use skyr::execute::{ExecutionContext, RuntimeValue};
 use skyr::Plugin;
 
 pub struct List;
 
+#[async_trait::async_trait]
 impl Plugin for List {
     fn import_name(&self) -> &str {
         "List"
@@ -38,41 +39,43 @@ impl Plugin for List {
         )
     }
 
-    fn module_value<'a>(&self, _ctx: ExecutionContext<'a>) -> Value<'a> {
-        Value::record([
+    fn module_value<'a>(&self, _ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
+        RuntimeValue::Collection(Collection::record([
             (
                 "first",
-                Value::function_sync(|_, args| {
-                    let list = known!(&args[0]).as_vec();
-                    list.first().cloned().unwrap_or(Value::Nil)
+                RuntimeValue::function_sync(|_, args| {
+                    let list = known!(&args[0]).as_collection().as_vec();
+                    list.first()
+                        .cloned()
+                        .unwrap_or(RuntimeValue::Primitive(Primitive::Nil))
                 }),
             ),
             (
                 "range",
-                Value::function_sync(|_, args| {
-                    let length = known!(&args[0]).as_usize();
-                    Value::List((0..length).map(|i| Value::Integer(i as i128)).collect())
+                RuntimeValue::function_sync(|_, args| {
+                    let length = known!(&args[0]).as_primitive().as_usize();
+                    RuntimeValue::Collection(Collection::List(
+                        (0..length)
+                            .map(|i| RuntimeValue::Primitive(i.into()))
+                            .collect(),
+                    ))
                 }),
             ),
             (
                 "map",
-                Value::function_async(|e, args| {
+                RuntimeValue::function_async(|e, args| {
                     Box::pin(async move {
-                        let list = known!(&args[0]).as_vec();
+                        let list = known!(&args[0]).as_collection().as_vec();
                         let f = known!(&args[1]).as_func();
 
                         let mut fo = FuturesOrdered::new();
                         for element in list {
                             fo.push_back(f(e, vec![element.clone()]));
                         }
-                        Value::List(fo.collect().await)
+                        RuntimeValue::Collection(Collection::List(fo.collect().await))
                     })
                 }),
             ),
-        ])
-    }
-
-    fn find_resource(&self, _resource: &skyr::Resource) -> Option<Box<dyn skyr::PluginResource>> {
-        None
+        ]))
     }
 }

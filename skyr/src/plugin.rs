@@ -1,14 +1,16 @@
 use std::io;
 
+use serde::{Deserialize, Serialize};
+
 use crate::analyze::Type;
-use crate::execute::{ExecutionContext, Value};
-use crate::{Resource, ResourceId, ResourceValue};
+use crate::execute::{ExecutionContext, RuntimeValue};
+use crate::{ResourceId, ResourceState};
 
 #[macro_export]
 macro_rules! export_plugin {
     ($plugin:tt) => {
         #[no_mangle]
-        extern "C" fn hello() -> *mut dyn Plugin {
+        extern "C" fn skyr_plugin() -> *mut dyn Plugin {
             Box::into_raw(Box::new($plugin))
         }
     };
@@ -18,24 +20,34 @@ macro_rules! export_plugin {
 macro_rules! known {
     ($value:expr) => {{
         match $value {
-            p @ Value::Pending(_) => return p.clone(),
+            p @ skyr::execute::RuntimeValue::Pending(_) => return p.clone(),
             v => v,
         }
     }};
 }
 
+#[async_trait::async_trait]
 pub trait Plugin: Send + Sync {
     fn import_name(&self) -> &str;
     fn module_type(&self) -> Type;
-    fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> Value<'a>;
-    fn find_resource(&self, resource: &Resource) -> Option<Box<dyn PluginResource>>;
+    fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a>;
+    async fn delete_matching_resource(&self, _resource: &ResourceState) -> io::Result<Option<()>> {
+        Ok(None)
+    }
+}
+
+pub trait TypeOf {
+    fn type_of() -> Type;
 }
 
 #[async_trait::async_trait]
-pub trait PluginResource {
-    fn resource_id<'a>(&self, arg: &Value<'a>) -> ResourceId {
+pub trait Resource: TypeOf {
+    type Arguments: PartialEq + Send + Sync + TypeOf + Serialize + for<'a> Deserialize<'a>;
+    type State: Send + Sync + TypeOf + Serialize + for<'a> Deserialize<'a>;
+
+    fn resource_id(&self, arg: &Self::Arguments) -> ResourceId {
         ResourceId::new(
-            match self.type_() {
+            match Self::type_of() {
                 Type::Function(_, r) => *r,
                 t => t,
             },
@@ -43,19 +55,21 @@ pub trait PluginResource {
         )
     }
 
-    fn type_(&self) -> Type;
+    fn id(&self, arg: &Self::Arguments) -> String;
 
-    fn id<'a>(&self, arg: &Value<'a>) -> String;
+    async fn create(&self, arg: Self::Arguments) -> io::Result<Self::State>;
 
-    async fn create<'a>(&self, arg: Value<'a>) -> io::Result<ResourceValue>;
-
-    async fn read<'a>(
+    async fn read(
         &self,
-        prev: ResourceValue,
-        arg: &mut ResourceValue,
-    ) -> io::Result<Option<ResourceValue>>;
+        prev: Self::State,
+        _arg: &mut Self::Arguments,
+    ) -> io::Result<Option<Self::State>> {
+        Ok(Some(prev))
+    }
 
-    async fn update<'a>(&self, arg: Value<'a>, prev: ResourceValue) -> io::Result<ResourceValue>;
+    async fn update(&self, arg: Self::Arguments, prev: Self::State) -> io::Result<Self::State>;
 
-    async fn delete<'a>(&self, prev: ResourceValue) -> io::Result<()>;
+    async fn delete(&self, _prev: Self::State) -> io::Result<()> {
+        Ok(())
+    }
 }

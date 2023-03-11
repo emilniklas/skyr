@@ -9,41 +9,27 @@ use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
 
 use crate::compile::Span;
-use crate::execute::Value;
-use crate::{AnalyzedProgram, Resource, ResourceId, ResourceValue, State};
+use crate::execute::RuntimeValue;
+use crate::Value;
+use crate::{AnalyzedProgram, ResourceId, ResourceState, State};
 
 #[derive(Debug)]
 pub struct ResourceError(pub ResourceId, pub io::Error);
 
 pub enum PlanStepKind<'a> {
     Create(
-        Value<'a>,
-        Box<
-            dyn 'a
-                + FnOnce(
-                    ResourceId,
-                    Value<'a>,
-                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
-        >,
+        Value,
+        Box<dyn 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>>,
     ),
     Update(
-        ResourceValue,
-        Value<'a>,
-        Box<
-            dyn 'a
-                + FnOnce(
-                    ResourceId,
-                    Value<'a>,
-                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
-        >,
+        Value,
+        Value,
+        Box<dyn 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>>,
     ),
     Delete(
         Box<
             dyn 'a
-                + FnOnce(
-                    ResourceId,
-                    ResourceValue,
-                ) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
+                + FnOnce(ResourceId, Value) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
         >,
     ),
 }
@@ -51,7 +37,7 @@ pub enum PlanStepKind<'a> {
 #[derive(Default)]
 pub struct Plan<'a> {
     steps: Vec<(ResourceId, PlanStepKind<'a>)>,
-    debug_messages: Vec<(Span, Value<'a>)>,
+    debug_messages: Vec<(Span, RuntimeValue<'a>)>,
     is_continuation: bool,
 }
 
@@ -93,12 +79,8 @@ impl<'a> Plan<'a> {
     pub fn register_create(
         &mut self,
         id: ResourceId,
-        args: Value<'a>,
-        f: impl 'a
-            + FnOnce(
-                ResourceId,
-                Value<'a>,
-            ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
+        args: Value,
+        f: impl 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Create(args, Box::new(f))));
@@ -107,13 +89,9 @@ impl<'a> Plan<'a> {
     pub fn register_update(
         &mut self,
         id: ResourceId,
-        old_args: ResourceValue,
-        args: Value<'a>,
-        f: impl 'a
-            + FnOnce(
-                ResourceId,
-                Value<'a>,
-            ) -> Pin<Box<dyn 'a + Future<Output = io::Result<Resource>>>>,
+        old_args: Value,
+        args: Value,
+        f: impl 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>,
     ) {
         self.steps
             .push((id, PlanStepKind::Update(old_args, args, Box::new(f))));
@@ -122,13 +100,12 @@ impl<'a> Plan<'a> {
     pub fn register_delete(
         &mut self,
         id: ResourceId,
-        f: impl 'a
-            + FnOnce(ResourceId, ResourceValue) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
+        f: impl 'a + FnOnce(ResourceId, Value) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
     ) {
         self.steps.push((id, PlanStepKind::Delete(Box::new(f))));
     }
 
-    pub fn register_debug(&mut self, span: Span, value: Value<'a>) {
+    pub fn register_debug(&mut self, span: Span, value: RuntimeValue<'a>) {
         self.debug_messages.push((span, value));
     }
 
@@ -185,12 +162,8 @@ impl<'a> Plan<'a> {
             });
             let events_tx = events_tx.clone();
             match kind {
-                PlanStepKind::Create(arg, f) => fo.push(Box::pin(async move {
-                    state.insert(
-                        f(id.clone(), arg)
-                            .await
-                            .map_err(|e| ResourceError(id.clone(), e))?,
-                    );
+                PlanStepKind::Create(_, f) => fo.push(Box::pin(async move {
+                    state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
                     drop(tx);
                     events_tx
                         .send(PlanExecutionEvent::Created(
@@ -201,12 +174,8 @@ impl<'a> Plan<'a> {
                         .unwrap_or(());
                     Ok(())
                 })),
-                PlanStepKind::Update(_, arg, f) => fo.push(Box::pin(async move {
-                    state.insert(
-                        f(id.clone(), arg)
-                            .await
-                            .map_err(|e| ResourceError(id.clone(), e))?,
-                    );
+                PlanStepKind::Update(_, _, f) => fo.push(Box::pin(async move {
+                    state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
                     drop(tx);
                     events_tx
                         .send(PlanExecutionEvent::Updated(

@@ -44,7 +44,7 @@ async fn main() -> io::Result<ExitCode> {
             .map(|dylib| {
                 let lib = libloading::Library::new(dylib).unwrap();
                 let func: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> =
-                    lib.get(b"hello").unwrap();
+                    lib.get(b"skyr_plugin").unwrap();
                 Box::from_raw(func())
             })
             .collect()
@@ -63,20 +63,22 @@ async fn teardown(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<Ex
 
     let mut plan = Plan::new();
 
-    'resources: for resource in state.all_not_in(&Default::default()) {
-        for plugin in plugins.iter() {
-            if let Some(plugin_resource) = plugin.find_resource(&resource) {
-                plan.register_delete(resource.id.clone(), move |_, _| {
-                    Box::pin(async move {
-                        plugin_resource.delete(resource.state.clone()).await?;
-                        Ok(())
-                    })
-                });
-                continue 'resources;
-            }
-        }
+    for resource in state.all_not_in(&Default::default()) {
+        let plugins = &plugins;
+        plan.register_delete(resource.id.clone(), move |_, _| {
+            Box::pin(async move {
+                for plugin in plugins.iter() {
+                    if let Some(()) = plugin.delete_matching_resource(&resource).await? {
+                        return Ok(());
+                    }
+                }
 
-        panic!("no plugin took ownership of {:?}", &resource);
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("no plugin took ownership of resource {:?}", resource.id),
+                ))
+            })
+        });
     }
 
     println!("{:?}", plan);
@@ -200,7 +202,7 @@ async fn apply(approve: bool, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitC
     {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let mut plan = match program.plan(&state).await {
-            Ok(p)=>p,
+            Ok(p) => p,
             Err(e) => {
                 println!("{:?}", e);
                 return Ok(ExitCode::FAILURE);

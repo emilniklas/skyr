@@ -1,26 +1,28 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::{fmt, io};
 
 use async_std::sync::RwLock;
 use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
-use crate::{compile::*, DisplayAsDebug, Plugin, Resource, ResourceError, ResourceId};
-use crate::{Plan, ResourceValue};
-use crate::{PluginResource, State};
+use crate::{
+    compile::*, DisplayAsDebug, Plugin, Primitive, ResourceError, ResourceId, ResourceState,
+};
+use crate::{Collection, Plan, Value};
+use crate::{Resource, State};
 
 #[derive(Clone)]
 pub struct ExecutionContext<'a> {
     parent: Option<Box<ExecutionContext<'a>>>,
     pub state: &'a State,
     table: &'a SymbolTable<'a>,
-    bindings: Arc<RwLock<BTreeMap<NodeId, Value<'a>>>>,
+    bindings: Arc<RwLock<BTreeMap<NodeId, RuntimeValue<'a>>>>,
     import_map: ImportMap<'a>,
 }
 
@@ -49,7 +51,7 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
-    pub fn get_binding(&self, id: NodeId) -> Pin<Box<dyn '_ + Future<Output = Value<'a>>>> {
+    pub fn get_binding(&self, id: NodeId) -> Pin<Box<dyn '_ + Future<Output = RuntimeValue<'a>>>> {
         Box::pin(async move {
             let bindings = self.bindings.read().await;
             match bindings.get(&id) {
@@ -93,20 +95,21 @@ impl<'a> Executor<'a> {
         if !self.is_pending.into_inner() {
             let used = self.used_resources.into_inner();
 
-            'resources: for resource in state.all_not_in(&used) {
-                for plugin in self.plugins.iter() {
-                    if let Some(plugin_resource) = plugin.find_resource(&resource) {
-                        plan.register_delete(resource.id.clone(), move |_, _| {
-                            Box::pin(async move {
-                                plugin_resource.delete(resource.state.clone()).await?;
-                                Ok(())
-                            })
-                        });
-                        continue 'resources;
-                    }
-                }
+            for resource in state.all_not_in(&used) {
+                plan.register_delete(resource.id.clone(), move |_, _| {
+                    Box::pin(async move {
+                        for plugin in self.plugins.iter() {
+                            if let Some(()) = plugin.delete_matching_resource(&resource).await? {
+                                return Ok(());
+                            }
+                        }
 
-                panic!("no plugin took ownership of {:?}", &resource);
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("no plugin took ownership of resource {:?}", resource.id),
+                        ))
+                    })
+                });
             }
         }
 
@@ -117,7 +120,7 @@ impl<'a> Executor<'a> {
         &self,
         ctx: ExecutionContext<'a>,
         module: &'a Module,
-    ) -> Pin<Box<dyn '_ + Future<Output = Value<'a>>>> {
+    ) -> Pin<Box<dyn '_ + Future<Output = RuntimeValue<'a>>>> {
         Box::pin(async move {
             let mut exports = vec![];
 
@@ -143,7 +146,7 @@ impl<'a> Executor<'a> {
                 fo.push(async move { (name, value.resolve(self).await) });
             }
 
-            Value::Record(fo.collect::<Vec<_>>().await)
+            RuntimeValue::Collection(Collection::record(fo.collect::<Vec<_>>().await))
         })
     }
 
@@ -151,7 +154,7 @@ impl<'a> Executor<'a> {
         &self,
         ctx: ExecutionContext<'a>,
         statement: &'a Statement,
-    ) -> Value<'a> {
+    ) -> RuntimeValue<'a> {
         let mut debug = None;
         let exp = match statement {
             Statement::Expression(e) => self.execute_expression(ctx, e),
@@ -161,12 +164,12 @@ impl<'a> Executor<'a> {
                 self.execute_expression(ctx, &d.expression)
             }
             Statement::Return(r) => return self.execute_expression(ctx, &r.expression),
-            Statement::TypeDefinition(_) => Value::Nil,
+            Statement::TypeDefinition(_) => RuntimeValue::Primitive(Primitive::Nil),
             Statement::Import(i) => self.execute_import(ctx, i).await,
             Statement::If(i) => return self.execute_if(ctx, i).await,
             Statement::Block(b) => return self.execute_block(ctx, b).await,
         };
-        Value::defer(move |e| {
+        RuntimeValue::defer(move |e| {
             let exp = exp.clone();
             let debug = debug.clone();
             Box::pin(async move {
@@ -176,31 +179,31 @@ impl<'a> Executor<'a> {
                         e.plan.write().await.register_debug(span, v);
                     }
                 }
-                Value::Nil
+                RuntimeValue::Primitive(Primitive::Nil)
             })
         })
     }
 
-    pub async fn execute_if(&self, ctx: ExecutionContext<'a>, if_: &'a If) -> Value<'a> {
+    pub async fn execute_if(&self, ctx: ExecutionContext<'a>, if_: &'a If) -> RuntimeValue<'a> {
         let condition = self.execute_expression(ctx.clone(), &if_.condition);
 
-        Value::defer(move |e| {
+        RuntimeValue::defer(move |e| {
             let condition = condition.clone();
             let ctx = ctx.clone();
             Box::pin(async move {
                 let condition = condition.resolve(e).await;
 
-                if let Value::Pending(deps) = condition {
+                if let RuntimeValue::Pending(deps) = condition {
                     e.is_pending.fetch_or(true, Ordering::SeqCst);
-                    return Value::Pending(deps);
+                    return RuntimeValue::Pending(deps);
                 }
 
-                if condition.as_bool() {
+                if condition.as_primitive().as_bool() {
                     e.execute_statement(ctx, &if_.consequence).await
                 } else if let Some(else_clause) = &if_.else_clause {
                     e.execute_statement(ctx, else_clause).await
                 } else {
-                    Value::Nil
+                    RuntimeValue::Primitive(Primitive::Nil)
                 }
             })
         })
@@ -210,7 +213,7 @@ impl<'a> Executor<'a> {
         &self,
         ctx: ExecutionContext<'a>,
         block: &'a Block,
-    ) -> Pin<Box<dyn '_ + Future<Output = Value<'a>>>> {
+    ) -> Pin<Box<dyn '_ + Future<Output = RuntimeValue<'a>>>> {
         Box::pin(async move {
             let fo = FuturesUnordered::new();
 
@@ -226,12 +229,16 @@ impl<'a> Executor<'a> {
             fo.collect::<Vec<_>>()
                 .await
                 .into_iter()
-                .find(|v| !matches!(v, Value::Nil))
-                .unwrap_or(Value::Nil)
+                .find(|v| !matches!(v, RuntimeValue::Primitive(Primitive::Nil)))
+                .unwrap_or(RuntimeValue::Primitive(Primitive::Nil))
         })
     }
 
-    pub async fn execute_import(&self, ctx: ExecutionContext<'a>, import: &'a Import) -> Value<'a> {
+    pub async fn execute_import(
+        &self,
+        ctx: ExecutionContext<'a>,
+        import: &'a Import,
+    ) -> RuntimeValue<'a> {
         let external = ctx.import_map.resolve(import).expect("unresolved import");
 
         let value = match external {
@@ -248,7 +255,7 @@ impl<'a> Executor<'a> {
         &self,
         ctx: ExecutionContext<'a>,
         assignment: &'a Assignment,
-    ) -> Value<'a> {
+    ) -> RuntimeValue<'a> {
         let value = self.execute_expression(ctx.clone(), &assignment.value);
         let mut bindings = ctx.bindings.write().await;
         bindings.insert(assignment.id, value.clone());
@@ -259,30 +266,36 @@ impl<'a> Executor<'a> {
         &self,
         ctx: ExecutionContext<'a>,
         record: &'a Record<Expression>,
-    ) -> Value<'a> {
-        Value::Record({
+    ) -> RuntimeValue<'a> {
+        RuntimeValue::Collection(Collection::Record({
             let mut fo = FuturesOrdered::new();
             for f in &record.fields {
                 let n = f.identifier.symbol.clone();
                 let v = self.execute_expression(ctx.clone(), &f.value);
-                fo.push_back(async move { (n, v.resolve(self).await) });
+                fo.push_back(async move { (n.into(), v.resolve(self).await) });
             }
             fo.collect().await
-        })
+        }))
     }
 
     pub fn execute_expression(
         &self,
         ctx: ExecutionContext<'a>,
         expression: &'a Expression,
-    ) -> Value<'a> {
-        Value::defer(move |executor| {
+    ) -> RuntimeValue<'a> {
+        RuntimeValue::defer(move |executor| {
             let ctx = ctx.clone();
             Box::pin(async move {
                 match expression {
-                    Expression::StringLiteral(s) => Value::String(s.value.clone()),
-                    Expression::IntegerLiteral(i) => Value::Integer(i.value),
-                    Expression::BooleanLiteral(i) => Value::Boolean(i.value),
+                    Expression::StringLiteral(s) => {
+                        RuntimeValue::Primitive(Primitive::string(s.value.clone()))
+                    }
+                    Expression::IntegerLiteral(i) => {
+                        RuntimeValue::Primitive(Primitive::Integer(i.value))
+                    }
+                    Expression::BooleanLiteral(i) => {
+                        RuntimeValue::Primitive(Primitive::Boolean(i.value))
+                    }
                     Expression::Identifier(id) => {
                         let binding_id =
                             ctx.table.declaration(id).expect("undefined reference").id();
@@ -296,12 +309,12 @@ impl<'a> Executor<'a> {
                             .resolve(executor)
                             .await;
 
-                        if let Value::Pending(deps) = callee {
+                        if let RuntimeValue::Pending(deps) = callee {
                             executor.is_pending.fetch_or(true, Ordering::SeqCst);
-                            return Value::Pending(deps);
+                            return RuntimeValue::Pending(deps);
                         }
 
-                        if let Value::Function(f) = callee {
+                        if let RuntimeValue::Function(f) = callee {
                             let mut fo = FuturesOrdered::new();
                             for arg in &c.arguments {
                                 let v = executor.execute_expression(ctx.clone(), arg);
@@ -319,12 +332,15 @@ impl<'a> Executor<'a> {
                             .resolve(executor)
                             .await;
 
-                        if let Value::Pending(deps) = subject {
+                        if let RuntimeValue::Pending(deps) = subject {
                             executor.is_pending.fetch_or(true, Ordering::SeqCst);
-                            return Value::Pending(deps);
+                            return RuntimeValue::Pending(deps);
                         }
 
-                        subject.access_member(ma.identifier.symbol.as_str()).clone()
+                        subject
+                            .as_collection()
+                            .access_member(ma.identifier.symbol.as_str())
+                            .clone()
                     }
                     Expression::Construct(construct) => {
                         let subject = executor
@@ -332,12 +348,12 @@ impl<'a> Executor<'a> {
                             .resolve(executor)
                             .await;
 
-                        if let Value::Pending(deps) = subject {
+                        if let RuntimeValue::Pending(deps) = subject {
                             executor.is_pending.fetch_or(true, Ordering::SeqCst);
-                            return Value::Pending(deps);
+                            return RuntimeValue::Pending(deps);
                         }
 
-                        if let Value::Function(f) = subject {
+                        if let RuntimeValue::Function(f) = subject {
                             let args = vec![executor.execute_record(ctx, &construct.record).await];
                             f(executor, args).await
                         } else {
@@ -356,100 +372,105 @@ impl<'a> Executor<'a> {
                         .await;
 
                         match (lhs, &op.operator.kind, rhs) {
-                            (Value::Pending(mut l), _, Value::Pending(r)) => {
+                            (RuntimeValue::Pending(mut l), _, RuntimeValue::Pending(r)) => {
                                 l.extend(r);
-                                Value::Pending(l)
+                                RuntimeValue::Pending(l)
                             }
 
-                            (Value::Pending(ids), _, _) | (_, _, Value::Pending(ids)) => {
-                                Value::Pending(ids)
-                            }
+                            (RuntimeValue::Pending(ids), _, _)
+                            | (_, _, RuntimeValue::Pending(ids)) => RuntimeValue::Pending(ids),
 
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::LessThan,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs < rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs < rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::LessThanOrEqualTo,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs <= rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs <= rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::EqualTo,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs == rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs == rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::NotEqualTo,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs != rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs != rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::GreaterThanOrEqualTo,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs >= rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs >= rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::GreaterThan,
-                                Value::Integer(rhs),
-                            ) => Value::Boolean(lhs > rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs > rhs)),
 
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::Plus,
-                                Value::Integer(rhs),
-                            ) => Value::Integer(lhs + rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Integer(lhs + rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::Minus,
-                                Value::Integer(rhs),
-                            ) => Value::Integer(lhs - rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Integer(lhs - rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::Multiply,
-                                Value::Integer(rhs),
-                            ) => Value::Integer(lhs * rhs),
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Integer(lhs * rhs)),
                             (
-                                Value::Integer(lhs),
+                                RuntimeValue::Primitive(Primitive::Integer(lhs)),
                                 BinaryOperatorKind::Divide,
-                                Value::Integer(rhs),
-                            ) => Value::Integer(lhs / rhs),
-
-                            (Value::Boolean(lhs), BinaryOperatorKind::And, Value::Boolean(rhs)) => {
-                                Value::Boolean(lhs && rhs)
-                            }
-                            (Value::Boolean(lhs), BinaryOperatorKind::Or, Value::Boolean(rhs)) => {
-                                Value::Boolean(lhs || rhs)
-                            }
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Integer(lhs / rhs)),
 
                             (
-                                Value::String(mut lhs),
-                                BinaryOperatorKind::Plus,
-                                Value::String(rhs),
-                            ) => Value::String({
-                                lhs.push_str(&rhs);
-                                lhs
-                            }),
+                                RuntimeValue::Primitive(Primitive::Boolean(lhs)),
+                                BinaryOperatorKind::And,
+                                RuntimeValue::Primitive(Primitive::Boolean(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs && rhs)),
                             (
-                                Value::String(mut lhs),
-                                BinaryOperatorKind::Plus,
-                                Value::Integer(rhs),
-                            ) => Value::String({
-                                lhs.push_str(&format!("{}", rhs));
-                                lhs
-                            }),
+                                RuntimeValue::Primitive(Primitive::Boolean(lhs)),
+                                BinaryOperatorKind::Or,
+                                RuntimeValue::Primitive(Primitive::Boolean(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs || rhs)),
+
                             (
-                                Value::String(lhs),
+                                RuntimeValue::Primitive(Primitive::String(lhs)),
+                                BinaryOperatorKind::Plus,
+                                RuntimeValue::Primitive(Primitive::String(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::String({
+                                let mut s = lhs.to_string();
+                                s.push_str(&rhs);
+                                s.into()
+                            })),
+                            (
+                                RuntimeValue::Primitive(Primitive::String(lhs)),
+                                BinaryOperatorKind::Plus,
+                                RuntimeValue::Primitive(Primitive::Integer(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::String({
+                                let mut s = lhs.to_string();
+                                s.push_str(&format!("{}", rhs));
+                                s.into()
+                            })),
+                            (
+                                RuntimeValue::Primitive(Primitive::String(lhs)),
                                 BinaryOperatorKind::EqualTo,
-                                Value::String(rhs),
-                            ) => Value::Boolean(lhs == rhs),
+                                RuntimeValue::Primitive(Primitive::String(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs == rhs)),
                             (
-                                Value::String(lhs),
+                                RuntimeValue::Primitive(Primitive::String(lhs)),
                                 BinaryOperatorKind::NotEqualTo,
-                                Value::String(rhs),
-                            ) => Value::Boolean(lhs != rhs),
+                                RuntimeValue::Primitive(Primitive::String(rhs)),
+                            ) => RuntimeValue::Primitive(Primitive::Boolean(lhs != rhs)),
 
                             (lhs, op, rhs) => {
                                 panic!("invalid operation: {:?} {:?} {:?}", lhs, op, rhs)
@@ -457,19 +478,23 @@ impl<'a> Executor<'a> {
                         }
                     }
 
-                    Expression::List(list) => Value::List(
+                    Expression::List(list) => RuntimeValue::Collection(Collection::List(
                         list.elements
                             .iter()
                             .map(|e| executor.execute_expression(ctx.clone(), e))
                             .collect(),
-                    ),
+                    )),
                 }
             })
         })
     }
 
-    pub fn execute_function(&self, ctx: ExecutionContext<'a>, function: &'a Function) -> Value<'a> {
-        Value::Function(Arc::new(move |executor, args| {
+    pub fn execute_function(
+        &self,
+        ctx: ExecutionContext<'a>,
+        function: &'a Function,
+    ) -> RuntimeValue<'a> {
+        RuntimeValue::Function(Arc::new(move |executor, args| {
             let ctx = ctx.inner();
 
             Box::pin(async move {
@@ -485,20 +510,23 @@ impl<'a> Executor<'a> {
         }))
     }
 
-    async fn register_create(
+    async fn register_create<R: Resource + 'a>(
         &self,
-        resource: impl PluginResource + 'a,
+        resource: R,
         id: ResourceId,
-        args: Vec<Value<'a>>,
+        mut args: Vec<RuntimeValue<'a>>,
     ) {
         let mut plan = self.plan.write().await;
-        plan.register_create(id.clone(), args[0].clone(), {
-            move |id, arg| {
+        let arg_value = args.remove(0).into_value();
+        plan.register_create(id.clone(), arg_value.clone(), {
+            move || {
                 Box::pin(async move {
-                    Ok(Resource {
+                    let arg: R::Arguments = arg_value.deserialize().unwrap();
+                    let state = resource.create(arg).await?;
+                    Ok(ResourceState {
                         id,
-                        arg: arg.clone().into(),
-                        state: resource.create(arg).await?,
+                        arg: arg_value,
+                        state: Value::serialize(&state).unwrap(),
                     })
                 })
             }
@@ -507,13 +535,10 @@ impl<'a> Executor<'a> {
 }
 
 #[derive(Clone)]
-pub enum Value<'a> {
-    Nil,
-    String(String),
-    Integer(i128),
-    Boolean(bool),
+pub enum RuntimeValue<'a> {
+    Primitive(Primitive),
+    Collection(Collection<RuntimeValue<'a>>),
     Deferred(Deferred<'a>),
-    Record(Vec<(String, Value<'a>)>),
     Function(
         Arc<
             dyn 'a
@@ -521,23 +546,31 @@ pub enum Value<'a> {
                 + Sync
                 + for<'e> Fn(
                     &'e Executor<'a>,
-                    Vec<Value<'a>>,
-                ) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>>,
+                    Vec<RuntimeValue<'a>>,
+                ) -> Pin<Box<dyn Future<Output = RuntimeValue<'a>> + 'e>>,
         >,
     ),
     Pending(Vec<ResourceId>),
-    List(Vec<Value<'a>>),
+}
+
+impl<'a> From<Value> for RuntimeValue<'a> {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Primitive(p) => RuntimeValue::Primitive(p),
+            Value::Collection(c) => RuntimeValue::Collection(c.map(Into::into)),
+        }
+    }
 }
 
 struct TrackedFmtValue<'v, 'a> {
-    value: &'v Value<'a>,
+    value: &'v RuntimeValue<'a>,
     arcs: &'v std::cell::RefCell<Vec<Arc<RwLock<DeferredState<'a>>>>>,
 }
 
 impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.value {
-            Value::Deferred(Deferred { inner }) => match inner.try_read() {
+            RuntimeValue::Deferred(Deferred { inner }) => match inner.try_read() {
                 None => write!(f, "<deferred>"),
                 Some(guard) => match &*guard {
                     DeferredState::Resolved(r) => {
@@ -561,11 +594,9 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                     DeferredState::Deferred(_) => write!(f, "<deferred>"),
                 },
             },
-            Value::String(s) => fmt::Debug::fmt(s, f),
-            Value::Integer(i) => fmt::Debug::fmt(i, f),
-            Value::Boolean(b) => fmt::Debug::fmt(b, f),
-            Value::Nil => write!(f, "<nil>"),
-            Value::Record(fields) => {
+            RuntimeValue::Function(_) => write!(f, "<fn>"),
+            RuntimeValue::Pending(_) => write!(f, "<pending>"),
+            RuntimeValue::Collection(Collection::Record(fields)) => {
                 let mut s = f.debug_map();
                 for (name, value) in fields.iter() {
                     s.entry(
@@ -578,7 +609,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 }
                 s.finish()
             }
-            Value::List(elements) => {
+            RuntimeValue::Collection(Collection::List(elements)) => {
                 let mut l = f.debug_list();
                 for value in elements.iter() {
                     l.entry(&TrackedFmtValue {
@@ -588,55 +619,74 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 }
                 l.finish()
             }
-            Value::Function(_) => write!(f, "<fn>"),
-            Value::Pending(_) => write!(f, "<pending>"),
+            RuntimeValue::Collection(Collection::Tuple(elements)) => {
+                let mut l = f.debug_tuple("");
+                for value in elements.iter() {
+                    l.field(&TrackedFmtValue {
+                        value,
+                        arcs: self.arcs,
+                    });
+                }
+                l.finish()
+            }
+            RuntimeValue::Primitive(v) => v.fmt(f),
         }
     }
 }
 
-impl<'a> Value<'a> {
+impl<'a> RuntimeValue<'a> {
     pub fn dependencies(&self) -> Vec<ResourceId> {
         match self {
-            Value::Nil | Value::String(_) | Value::Integer(_) | Value::Boolean(_) => vec![],
-            Value::Deferred(_) => panic!("cannot get dependencies from deferred"),
-            Value::Record(r) => {
+            RuntimeValue::Deferred(_) => panic!("cannot get dependencies from deferred"),
+            RuntimeValue::Function(_) => todo!(),
+            RuntimeValue::Pending(ids) => ids.clone(),
+
+            RuntimeValue::Collection(Collection::Record(r)) => {
                 let mut result = vec![];
                 for (_, v) in r {
                     result.extend(v.dependencies());
                 }
                 result
             }
-            Value::List(l) => {
+            RuntimeValue::Collection(Collection::List(l)) => {
                 let mut result = vec![];
                 for v in l {
                     result.extend(v.dependencies());
                 }
                 result
             }
-            Value::Function(_) => todo!(),
-            Value::Pending(ids) => ids.clone(),
+            RuntimeValue::Collection(Collection::Tuple(l)) => {
+                let mut result = vec![];
+                for v in l {
+                    result.extend(v.dependencies());
+                }
+                result
+            }
+            RuntimeValue::Primitive(_) => vec![],
         }
     }
 
     pub fn is_pending(&self) -> bool {
         match self {
-            Value::Nil | Value::String(_) | Value::Integer(_) | Value::Boolean(_) => false,
+            RuntimeValue::Function(_) => todo!(),
+            RuntimeValue::Pending(_) | RuntimeValue::Deferred(_) => true,
 
-            Value::Record(r) => r.iter().any(|(_, v)| v.is_pending()),
-            Value::List(l) => l.iter().any(|e| e.is_pending()),
+            RuntimeValue::Collection(Collection::Record(r)) => {
+                r.iter().any(|(_, v)| v.is_pending())
+            }
+            RuntimeValue::Collection(Collection::List(l)) => l.iter().any(|e| e.is_pending()),
+            RuntimeValue::Collection(Collection::Tuple(l)) => l.iter().any(|e| e.is_pending()),
 
-            Value::Function(_) => todo!(),
-
-            Value::Pending(_) | Value::Deferred(_) => true,
+            RuntimeValue::Primitive(_) => false,
         }
     }
 
-    pub fn record(i: impl IntoIterator<Item = (impl Into<String>, Value<'a>)>) -> Self {
-        Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
-    }
-
     pub fn function_sync(
-        f: impl 'a + Copy + Send + Sync + for<'e> Fn(&'e Executor<'a>, Vec<Value<'a>>) -> Value<'a>,
+        f: impl 'a
+            + Copy
+            + Send
+            + Sync
+            + for<'e> Fn(&'e Executor<'a>, Vec<RuntimeValue<'a>>) -> RuntimeValue<'a>,
     ) -> Self {
         Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a) })))
     }
@@ -648,14 +698,14 @@ impl<'a> Value<'a> {
             + Sync
             + for<'e> Fn(
                 &'e Executor<'a>,
-                Vec<Value<'a>>,
-            ) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>>,
+                Vec<RuntimeValue<'a>>,
+            ) -> Pin<Box<dyn 'e + Future<Output = RuntimeValue<'a>>>>,
     ) -> Self {
         Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a).await })))
     }
 }
 
-impl<'a> fmt::Debug for Value<'a> {
+impl<'a> fmt::Debug for RuntimeValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         TrackedFmtValue {
             value: self,
@@ -665,41 +715,40 @@ impl<'a> fmt::Debug for Value<'a> {
     }
 }
 
-impl<'a> fmt::Display for Value<'a> {
+impl<'a> fmt::Display for RuntimeValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::String(s) => s.fmt(f),
-            Value::Integer(i) => i.fmt(f),
+            RuntimeValue::Primitive(v) => v.fmt(f),
             v => write!(f, "{:#?}", v),
         }
     }
 }
 
-impl<'a> Value<'a> {
+impl<'a> RuntimeValue<'a> {
     pub fn resolve<'e>(
         self,
         executor: &'e Executor<'a>,
-    ) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>> {
+    ) -> Pin<Box<dyn Future<Output = RuntimeValue<'a>> + 'e>> {
         Box::pin(async move {
             match self {
-                Value::Deferred(d) => d.resolve(executor).await,
-                Value::Record(r) => {
+                RuntimeValue::Deferred(d) => d.resolve(executor).await,
+                RuntimeValue::Collection(Collection::Record(r)) => {
                     let mut fo = FuturesOrdered::new();
 
                     for (n, v) in r {
                         fo.push_back(async move { (n, v.resolve(executor).await) })
                     }
 
-                    Value::Record(fo.collect().await)
+                    RuntimeValue::Collection(Collection::Record(fo.collect().await))
                 }
-                Value::List(l) => {
+                RuntimeValue::Collection(Collection::List(l)) => {
                     let mut fo = FuturesOrdered::new();
 
                     for v in l {
                         fo.push_back(v.resolve(executor));
                     }
 
-                    Value::List(fo.collect().await)
+                    RuntimeValue::Collection(Collection::List(fo.collect().await))
                 }
                 _ => self,
             }
@@ -710,30 +759,32 @@ impl<'a> Value<'a> {
         f: impl 'a
             + Send
             + Sync
-            + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>>,
-    ) -> Value<'a> {
-        Value::Deferred(Deferred {
+            + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn 'e + Future<Output = RuntimeValue<'a>>>>,
+    ) -> RuntimeValue<'a> {
+        RuntimeValue::Deferred(Deferred {
             inner: Arc::new(DeferredState::Deferred(Box::pin(f)).into()),
         })
     }
 
-    pub fn resource(
-        ctx: ExecutionContext<'a>,
-        r: impl 'a + Clone + PluginResource + Send + Sync,
-    ) -> Value<'a> {
-        Value::Function(Arc::new(move |executor, args| {
+    pub fn resource<R>(ctx: ExecutionContext<'a>, r: R) -> RuntimeValue<'a>
+    where
+        R: 'a + Clone + Resource + Send + Sync,
+    {
+        RuntimeValue::Function(Arc::new(move |executor, args| {
             let r = r.clone();
             let dependencies = args[0].dependencies();
             if !dependencies.is_empty() {
-                return Box::pin(async move { Value::Pending(dependencies) });
+                return Box::pin(async move { RuntimeValue::Pending(dependencies) });
             }
 
-            let id = r.resource_id(&args[0]);
+            let new_arg: R::Arguments = args[0].clone().into_value().deserialize().unwrap();
+
+            let id = r.resource_id(&new_arg);
             Box::pin(async move {
                 match ctx.state.get(&id) {
                     None => {
                         executor.register_create(r, id.clone(), args).await;
-                        Value::Pending(vec![id])
+                        RuntimeValue::Pending(vec![id])
                     }
                     Some(mut resource) => {
                         executor
@@ -742,11 +793,14 @@ impl<'a> Value<'a> {
                             .await
                             .insert(resource.id.clone());
 
-                        resource.state = match r.read(resource.state, &mut resource.arg).await {
+                        let mut prev_state = resource.state.deserialize().unwrap();
+                        let mut prev_arg = resource.arg.deserialize().unwrap();
+
+                        prev_state = match r.read(prev_state, &mut prev_arg).await {
                             Ok(Some(s)) => s,
                             Ok(None) => {
                                 executor.register_create(r, id.clone(), args).await;
-                                return Value::Pending(vec![id]);
+                                return RuntimeValue::Pending(vec![id]);
                             }
                             Err(e) => {
                                 executor
@@ -754,29 +808,29 @@ impl<'a> Value<'a> {
                                     .write()
                                     .await
                                     .push(ResourceError(resource.id, e));
-                                return Value::Pending(vec![id]);
+                                return RuntimeValue::Pending(vec![id]);
                             }
                         };
 
-                        if resource.arg != args[0].clone().into() {
+                        if new_arg != prev_arg {
                             let mut plan = executor.plan.write().await;
                             plan.register_update(
                                 id.clone(),
-                                resource.arg.clone(),
-                                args[0].clone(),
+                                Value::serialize(&prev_arg).unwrap(),
+                                Value::serialize(&new_arg).unwrap(),
                                 {
-                                    move |_id, new_arg| {
+                                    move || {
                                         let r = r.clone();
                                         Box::pin(async move {
-                                            resource.arg = new_arg.clone().into();
-                                            resource.state =
-                                                r.update(new_arg, resource.state).await?;
+                                            resource.arg = Value::serialize(&new_arg).unwrap();
+                                            let new_state = r.update(new_arg, prev_state).await?;
+                                            resource.state = Value::serialize(&new_state).unwrap();
                                             Ok(resource)
                                         })
                                     }
                                 },
                             );
-                            return Value::Pending(vec![id]);
+                            return RuntimeValue::Pending(vec![id]);
                         }
 
                         resource.state.into()
@@ -786,66 +840,40 @@ impl<'a> Value<'a> {
         }))
     }
 
-    pub fn access_member(&self, name: &str) -> &Value<'a> {
-        if let Value::Record(r) = self {
-            for (n, v) in r {
-                if name == *n {
-                    return v;
-                }
-            }
-            panic!("undefined field {}", name);
-        } else {
-            panic!("cannot access {} on {:?}", name, self);
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        if let Value::String(s) = self {
-            &s
-        } else {
-            panic!("{:?} is not a string", self)
-        }
-    }
-
-    pub fn as_bool(&self) -> bool {
-        if let Value::Boolean(b) = self {
-            *b
-        } else {
-            panic!("{:?} is not a boolean", self)
-        }
-    }
-
-    pub fn as_vec(&self) -> &Vec<Value<'a>> {
-        if let Value::List(l) = self {
-            l
-        } else {
-            panic!("{:?} is not a list", self)
-        }
-    }
-
     pub fn as_func(
         &self,
     ) -> &dyn for<'e> Fn(
         &'e Executor<'a>,
-        Vec<Value<'a>>,
-    ) -> Pin<Box<dyn 'e + Future<Output = Value<'a>>>> {
-        if let Value::Function(f) = self {
+        Vec<RuntimeValue<'a>>,
+    ) -> Pin<Box<dyn 'e + Future<Output = RuntimeValue<'a>>>> {
+        if let RuntimeValue::Function(f) = self {
             f.as_ref()
         } else {
             panic!("{:?} is not a function", self)
         }
     }
 
-    pub fn as_i128(&self) -> i128 {
-        if let Value::Integer(i) = self {
-            *i
-        } else {
-            panic!("{:?} is not an integer", self)
+    pub fn into_value(self) -> Value {
+        match self.try_into() {
+            Ok(v) => v,
+            Err(rv) => panic!("{:?} is not a known value", rv),
         }
     }
 
-    pub fn as_usize(&self) -> usize {
-        self.as_i128() as usize
+    pub fn as_primitive(&self) -> &Primitive {
+        if let RuntimeValue::Primitive(v) = self {
+            v
+        } else {
+            panic!("{:?} is not a known primitive", self)
+        }
+    }
+
+    pub fn as_collection(&self) -> &Collection<RuntimeValue<'a>> {
+        if let RuntimeValue::Collection(v) = self {
+            v
+        } else {
+            panic!("{:?} is not a known collection", self)
+        }
     }
 }
 
@@ -855,7 +883,7 @@ pub struct Deferred<'a> {
 }
 
 impl<'a> Deferred<'a> {
-    pub async fn resolve(&self, executor: &Executor<'a>) -> Value<'a> {
+    pub async fn resolve(&self, executor: &Executor<'a>) -> RuntimeValue<'a> {
         {
             if let DeferredState::Resolved(v) = &*self.inner.read().await {
                 return v.clone();
@@ -885,24 +913,12 @@ enum DeferredState<'a> {
                 dyn 'a
                     + Send
                     + Sync
-                    + for<'e> Fn(&'e Executor<'a>) -> Pin<Box<dyn Future<Output = Value<'a>> + 'e>>,
+                    + for<'e> Fn(
+                        &'e Executor<'a>,
+                    )
+                        -> Pin<Box<dyn Future<Output = RuntimeValue<'a>> + 'e>>,
             >,
         >,
     ),
-    Resolved(Value<'a>),
-}
-
-impl<'a> From<ResourceValue> for Value<'a> {
-    fn from(value: ResourceValue) -> Self {
-        match value {
-            ResourceValue::Nil => Self::Nil,
-            ResourceValue::String(s) => Self::String(s),
-            ResourceValue::Integer(i) => Self::Integer(i),
-            ResourceValue::Boolean(b) => Self::Boolean(b),
-            ResourceValue::Record(r) => {
-                Self::Record(r.into_iter().map(|(n, v)| (n, v.into())).collect())
-            }
-            ResourceValue::List(l) => Self::List(l.into_iter().map(|e| e.into()).collect()),
-        }
-    }
+    Resolved(RuntimeValue<'a>),
 }

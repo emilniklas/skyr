@@ -12,4 +12,5 @@ crate_type = ["cdylib"]
 [dependencies]
 async-std = "1.12.0"
 async-trait = "0.1.66"
+serde = "1.0.154"
 skyr = { path = "../skyr" }

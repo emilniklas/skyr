@@ -2,91 +2,125 @@ use std::io;
 
 use async_std::fs::OpenOptions;
 use async_std::io::{ReadExt, WriteExt};
-use skyr::export_plugin;
+use serde::{Deserialize, Serialize};
+use skyr::{export_plugin, Collection, ResourceState, TypeOf};
 
 export_plugin!(FileSystem);
 
 use skyr::analyze::Type;
-use skyr::execute::{ExecutionContext, Value};
-use skyr::{Plugin, PluginResource, ResourceValue};
+use skyr::execute::{ExecutionContext, RuntimeValue};
+use skyr::{Plugin, Resource};
 
 pub struct FileSystem;
 
+#[async_trait::async_trait]
 impl Plugin for FileSystem {
     fn import_name(&self) -> &str {
         "FileSystem"
     }
 
     fn module_type(&self) -> Type {
-        Type::named("FileSystem", Type::record([("File", File.type_())]))
+        Type::named(
+            "FileSystem",
+            Type::record([("File", FileConstructor::type_of())]),
+        )
     }
 
-    fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> Value<'a> {
-        Value::record([("File", Value::resource(ctx, File))])
+    fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
+        RuntimeValue::Collection(Collection::record([(
+            "File",
+            RuntimeValue::resource(ctx, FileConstructor),
+        )]))
     }
 
-    fn find_resource(&self, resource: &skyr::Resource) -> Option<Box<dyn PluginResource>> {
-        if resource.has_type(File.type_().return_type()) {
-            Some(Box::new(File))
+    async fn delete_matching_resource(&self, resource: &ResourceState) -> io::Result<Option<()>> {
+        if resource.has_type(&File::type_of()) {
+            Ok(Some(
+                FileConstructor
+                    .delete(resource.state.deserialize().unwrap())
+                    .await?,
+            ))
         } else {
-            None
+            Ok(None)
         }
     }
 }
 
 #[derive(Clone)]
-struct File;
+struct FileConstructor;
 
-#[async_trait::async_trait]
-impl PluginResource for File {
-    fn type_(&self) -> Type {
-        Type::function(
-            [Type::record([
+impl TypeOf for FileConstructor {
+    fn type_of() -> Type {
+        Type::function([FileArgs::type_of()], File::type_of())
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct FileArgs {
+    path: String,
+    content: String,
+}
+
+impl TypeOf for FileArgs {
+    fn type_of() -> Type {
+        Type::record([("path", Type::String), ("content", Type::String)])
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct File {
+    path: String,
+    content: String,
+    bytes: Vec<u8>,
+}
+
+impl TypeOf for File {
+    fn type_of() -> Type {
+        Type::named(
+            "FileSystem.File",
+            Type::record([
                 ("path", Type::String),
                 ("content", Type::String),
-            ])],
-            Type::named(
-                "FileSystem.File",
-                Type::record([
-                    ("path", Type::String),
-                    ("content", Type::String),
-                    ("bytes", Type::list(Type::Integer)),
-                ]),
-            ),
+                ("bytes", Type::list(Type::Integer)),
+            ]),
         )
     }
+}
 
-    fn id<'a>(&self, arg: &Value<'a>) -> String {
-        arg.access_member("path").as_str().into()
+#[async_trait::async_trait]
+impl Resource for FileConstructor {
+    type Arguments = FileArgs;
+    type State = File;
+
+    fn id(&self, arg: &Self::Arguments) -> String {
+        arg.path.clone()
     }
 
-    async fn create<'a>(&self, arg: Value<'a>) -> io::Result<ResourceValue> {
+    async fn create(&self, arg: Self::Arguments) -> io::Result<Self::State> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(arg.access_member("path").as_str())
+            .open(&arg.path)
             .await?;
 
-        let bytes = arg.access_member("content").as_str().as_bytes();
+        let bytes = arg.content.as_bytes();
         file.write_all(bytes).await?;
 
-        let bytes = ResourceValue::list(bytes.iter().copied());
-
-        let mut v: ResourceValue = arg.into();
-        v.set_member("bytes", bytes);
-        Ok(v)
+        Ok(File {
+            path: arg.path,
+            bytes: arg.content.as_bytes().to_vec(),
+            content: arg.content,
+        })
     }
 
-    async fn read<'a>(
+    async fn read(
         &self,
-        mut value: ResourceValue,
-        arg: &mut ResourceValue,
-    ) -> io::Result<Option<ResourceValue>> {
-        let mut file = match OpenOptions::new()
-            .read(true)
-            .open(value.access_member("path").as_str())
-            .await
-        {
+        prev: Self::State,
+        arg: &mut Self::Arguments,
+    ) -> io::Result<Option<Self::State>> {
+        let mut file = match OpenOptions::new().read(true).open(&prev.path).await {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -97,32 +131,34 @@ impl PluginResource for File {
 
         let content = String::from_utf8_lossy(&bytes).to_string();
 
-        arg.set_member("content", content.as_str());
-        value.set_member("content", content);
-        value.set_member("bytes", ResourceValue::list(bytes));
-        Ok(Some(value))
+        arg.path = prev.path.clone();
+        arg.content = content.clone();
+
+        Ok(Some(File {
+            path: prev.path,
+            content,
+            bytes,
+        }))
     }
 
-    async fn update<'a>(&self, arg: Value<'a>, _prev: ResourceValue) -> io::Result<ResourceValue> {
+    async fn update(&self, arg: Self::Arguments, _prev: Self::State) -> io::Result<Self::State> {
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
-            .open(arg.access_member("path").as_str())
+            .open(&arg.path)
             .await?;
 
-        let content = arg.access_member("content").as_str().to_string();
-        let bytes = content.as_bytes();
+        let bytes = arg.content.as_bytes();
         file.write_all(bytes).await?;
 
-        let bytes = ResourceValue::list(bytes.iter().copied());
-
-        let mut v: ResourceValue = arg.into();
-        v.set_member("content", content);
-        v.set_member("bytes", bytes);
-        Ok(v)
+        Ok(File {
+            path: arg.path,
+            bytes: bytes.to_vec(),
+            content: arg.content,
+        })
     }
 
-    async fn delete<'a>(&self, prev: ResourceValue) -> io::Result<()> {
-        async_std::fs::remove_file(prev.access_member("path").as_str()).await
+    async fn delete(&self, prev: Self::State) -> io::Result<()> {
+        async_std::fs::remove_file(&prev.path).await
     }
 }
