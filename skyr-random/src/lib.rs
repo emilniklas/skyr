@@ -22,21 +22,21 @@ impl Plugin for Random {
     fn module_type(&self) -> Type {
         Type::named(
             "Random",
-            Type::record([("Identifier", IdentifierConstructor::type_of())]),
+            Type::record([("Identifier", IdentifierResource::type_of())]),
         )
     }
 
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
         RuntimeValue::Collection(Collection::record([(
             "Identifier",
-            RuntimeValue::resource(ctx, IdentifierConstructor),
+            RuntimeValue::resource(ctx, IdentifierResource),
         )]))
     }
 
     async fn delete_matching_resource(&self, resource: &ResourceState) -> io::Result<Option<()>> {
         if resource.has_type(&Identifier::type_of()) {
             Ok(Some(
-                IdentifierConstructor
+                IdentifierResource
                     .delete(resource.state.deserialize().unwrap())
                     .await?,
             ))
@@ -46,29 +46,14 @@ impl Plugin for Random {
     }
 }
 
-#[derive(Clone)]
-struct IdentifierConstructor;
-
-impl TypeOf for IdentifierConstructor {
-    fn type_of() -> Type {
-        Type::function([IdentifierArgs::type_of()], Identifier::type_of())
-    }
-}
-
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(Serialize, Deserialize, PartialEq, TypeOf)]
 #[serde(rename_all = "camelCase")]
 struct IdentifierArgs {
     name: String,
     byte_length: usize,
 }
 
-impl TypeOf for IdentifierArgs {
-    fn type_of() -> Type {
-        Type::record([("name", Type::String), ("byteLength", Type::Integer)])
-    }
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
 struct Identifier {
     name: String,
@@ -76,21 +61,11 @@ struct Identifier {
     bytes: Vec<u8>,
 }
 
-impl TypeOf for Identifier {
-    fn type_of() -> Type {
-        Type::named(
-            "Random.Identifier",
-            Type::record([
-                ("name", Type::String),
-                ("hex", Type::String),
-                ("bytes", Type::list(Type::Integer)),
-            ]),
-        )
-    }
-}
+#[derive(Clone)]
+struct IdentifierResource;
 
 #[async_trait::async_trait]
-impl Resource for IdentifierConstructor {
+impl Resource for IdentifierResource {
     type Arguments = IdentifierArgs;
     type State = Identifier;
 

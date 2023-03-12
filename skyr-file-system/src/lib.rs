@@ -22,53 +22,30 @@ impl Plugin for FileSystem {
     fn module_type(&self) -> Type {
         Type::named(
             "FileSystem",
-            Type::record([("File", FileConstructor::type_of())]),
+            Type::record([("File", FileResource::type_of())]),
         )
     }
 
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
         RuntimeValue::Collection(Collection::record([(
             "File",
-            RuntimeValue::resource(ctx, FileConstructor),
+            RuntimeValue::resource(ctx, FileResource),
         )]))
     }
 
     async fn delete_matching_resource(&self, resource: &ResourceState) -> io::Result<Option<()>> {
-        if resource.has_type(&File::type_of()) {
-            Ok(Some(
-                FileConstructor
-                    .delete(resource.state.deserialize().unwrap())
-                    .await?,
-            ))
-        } else {
-            Ok(None)
-        }
+        FileResource.try_match_delete(resource).await
     }
 }
 
-#[derive(Clone)]
-struct FileConstructor;
-
-impl TypeOf for FileConstructor {
-    fn type_of() -> Type {
-        Type::function([FileArgs::type_of()], File::type_of())
-    }
-}
-
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(Serialize, Deserialize, PartialEq, TypeOf)]
 #[serde(rename_all = "camelCase")]
 struct FileArgs {
     path: String,
     content: String,
 }
 
-impl TypeOf for FileArgs {
-    fn type_of() -> Type {
-        Type::record([("path", Type::String), ("content", Type::String)])
-    }
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
 struct File {
     path: String,
@@ -76,21 +53,11 @@ struct File {
     bytes: Vec<u8>,
 }
 
-impl TypeOf for File {
-    fn type_of() -> Type {
-        Type::named(
-            "FileSystem.File",
-            Type::record([
-                ("path", Type::String),
-                ("content", Type::String),
-                ("bytes", Type::list(Type::Integer)),
-            ]),
-        )
-    }
-}
+#[derive(Clone)]
+struct FileResource;
 
 #[async_trait::async_trait]
-impl Resource for FileConstructor {
+impl Resource for FileResource {
     type Arguments = FileArgs;
     type State = File;
 

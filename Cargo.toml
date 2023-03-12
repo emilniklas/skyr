@@ -2,6 +2,7 @@
 members = [
   "skyr",
   "skyr-cli",
+  "skyr-derive",
   "skyr-file-system",
   "skyr-list",
   "skyr-random",
