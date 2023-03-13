@@ -3,6 +3,7 @@ import FileSystem
 
 id = Random.Identifier {
   name: "test2"
+  byteLength: 5
 }
 
 dir = FileSystem.Directory {
@@ -10,6 +11,6 @@ dir = FileSystem.Directory {
 }
 
 FileSystem.File {
-  path: dir.path + "/file2.txt"
-  content: "Hello, Worlds!\n"
+  path: dir.path + "/file3.txt"
+  content: "Hello, Worldzz!!\n"
 }

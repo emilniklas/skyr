@@ -9,8 +9,8 @@ use crate::Value;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceId {
-    type_: Type,
-    id: String,
+    pub type_: Type,
+    pub id: String,
 }
 
 impl fmt::Debug for ResourceId {

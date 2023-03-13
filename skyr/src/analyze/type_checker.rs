@@ -81,17 +81,7 @@ impl<'a> TypeEnvironment<'a> {
                 let arity = lhs_a.len().min(rhs_a.len());
 
                 let params = (0..arity)
-                    .map(|idx| {
-                        self.do_unify(
-                            // Here, lhs and rhs are swapped. This is because
-                            // params are contravariant.
-                            rhs_a[idx].clone(),
-                            rhs_wrap,
-                            lhs_a[idx].clone(),
-                            lhs_wrap,
-                            span,
-                        )
-                    })
+                    .map(|idx| self.unify(lhs_a[idx].clone(), rhs_a[idx].clone(), span))
                     .collect();
 
                 if lhs_a.len() != rhs_a.len() {
@@ -102,13 +92,7 @@ impl<'a> TypeEnvironment<'a> {
                     });
                 }
 
-                let return_type = self.do_unify(
-                    self.resolve(*lhs_r),
-                    lhs_wrap,
-                    self.resolve(*rhs_r),
-                    rhs_wrap,
-                    span,
-                );
+                let return_type = self.unify(self.resolve(*lhs_r), self.resolve(*rhs_r), span);
 
                 Type::Function(params, Box::new(return_type))
             }
@@ -469,7 +453,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
 
         let mut env = TypeEnvironment::new(&mut self.errors);
 
-        env.unify(type_, callee_type, &call.span);
+        env.unify(callee_type, type_, &call.span);
 
         env.resolve(return_type)
     }

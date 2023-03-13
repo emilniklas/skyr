@@ -10,6 +10,7 @@ use futures::{Future, StreamExt};
 
 use crate::compile::Span;
 use crate::execute::RuntimeValue;
+use crate::Diff;
 use crate::Value;
 use crate::{AnalyzedProgram, ResourceId, ResourceState, State};
 
@@ -38,7 +39,7 @@ pub enum PlanStepKind<'a> {
 pub struct Plan<'a> {
     steps: Vec<(ResourceId, PlanStepKind<'a>)>,
     debug_messages: Vec<(Span, RuntimeValue<'a>)>,
-    is_continuation: bool,
+    phase_index: usize,
 }
 
 impl<'a> fmt::Debug for Plan<'a> {
@@ -48,7 +49,7 @@ impl<'a> fmt::Debug for Plan<'a> {
         }
 
         if self.is_empty() {
-            if self.is_continuation {
+            if self.is_continuation() {
                 return write!(f, "✅ Nothing more to do");
             } else {
                 return write!(f, "✅ Nothing to do");
@@ -74,6 +75,44 @@ impl<'a> fmt::Debug for Plan<'a> {
 impl<'a> Plan<'a> {
     pub fn new() -> Self {
         Plan::default()
+    }
+
+    pub fn is_continuation(&self) -> bool {
+        self.phase_index > 0
+    }
+
+    pub fn phase_index(&self) -> usize {
+        self.phase_index
+    }
+
+    pub fn to_be_created(&self) -> Vec<(&ResourceId, &Value)> {
+        self.steps
+            .iter()
+            .filter_map(|(id, step)| match step {
+                PlanStepKind::Create(args, _) => Some((id, args)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn to_be_updated(&self) -> Vec<(&ResourceId, Diff)> {
+        self.steps
+            .iter()
+            .filter_map(|(id, step)| match step {
+                PlanStepKind::Update(old, new, _) => Some((id, old.diff(new))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn to_be_deleted(&self) -> Vec<&ResourceId> {
+        self.steps
+            .iter()
+            .filter_map(|(id, step)| match step {
+                PlanStepKind::Delete(_) => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn register_create(
@@ -230,10 +269,12 @@ impl<'a> Plan<'a> {
         state: &'a State,
         events_tx: Sender<PlanExecutionEvent>,
     ) -> Result<Plan<'a>, Vec<ResourceError>> {
+        let new_phase_index = self.phase_index + 1;
+
         self.execute_once(state, events_tx).await?;
 
         let mut plan = program.plan(&state).await?;
-        plan.is_continuation = true;
+        plan.phase_index = new_phase_index;
         Ok(plan)
     }
 
