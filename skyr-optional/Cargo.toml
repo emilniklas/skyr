@@ -1,0 +1,15 @@
+[package]
+name = "skyr-optional"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "std_skyr_optional"
+crate_type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.66"
+futures = "0.3.26"
+skyr = { path = "../skyr" }

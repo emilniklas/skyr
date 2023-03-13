@@ -1,3 +1,4 @@
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Result;
@@ -7,7 +8,6 @@ use syn::{
     parse_macro_input, Data, DataEnum, DataUnion, DeriveInput, Expr, Field, Fields, FieldsNamed,
     FieldsUnnamed,
 };
-use convert_case::{Case, Casing};
 
 #[proc_macro_derive(TypeOf)]
 pub fn type_of_derive(input: TokenStream) -> TokenStream {

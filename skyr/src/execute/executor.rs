@@ -287,6 +287,7 @@ impl<'a> Executor<'a> {
             let ctx = ctx.clone();
             Box::pin(async move {
                 match expression {
+                    Expression::Nil(_) => RuntimeValue::Primitive(Primitive::Nil),
                     Expression::StringLiteral(s) => {
                         RuntimeValue::Primitive(Primitive::string(s.value.clone()))
                     }

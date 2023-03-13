@@ -11,8 +11,8 @@ pub use parse::*;
 mod shunting_yard;
 pub use shunting_yard::*;
 
-use std::fmt;
 use crate::analyze::TypeError;
+use std::fmt;
 
 #[derive(Debug)]
 pub enum CompileError {

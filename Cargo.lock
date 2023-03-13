@@ -736,6 +736,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyr-optional"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "skyr",
+]
+
+[[package]]
 name = "skyr-random"
 version = "0.1.0"
 dependencies = [

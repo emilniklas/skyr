@@ -1,18 +1,7 @@
-import List
 import Random
-import FileSystem
 
 id = Random.Identifier {
   name: "test"
-  byteLength: 8
 }
 
-file = FileSystem.File {
-  path: "my-file2.txt"
-  content: id.hex
-}
-
-byteIds = List.map(file.bytes, fn(x) => Random.Identifier {
-  name: "test" + x
-  byteLength: 4
-})
+debug id.hex

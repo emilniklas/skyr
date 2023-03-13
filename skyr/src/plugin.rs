@@ -10,7 +10,8 @@ use crate::{ResourceId, ResourceState};
 macro_rules! export_plugin {
     ($plugin:tt) => {
         #[no_mangle]
-        extern "C" fn skyr_plugin() -> *mut dyn Plugin {
+        extern "C" fn skyr_plugin(idx: u64) -> *mut dyn Plugin {
+            skyr::analyze::TypeId::preload(idx);
             Box::into_raw(Box::new($plugin))
         }
     };
@@ -43,6 +44,12 @@ pub trait TypeOf {
 impl<T: Resource> TypeOf for T {
     fn type_of() -> Type {
         Type::function([T::Arguments::type_of()], T::State::type_of())
+    }
+}
+
+impl<T: TypeOf> TypeOf for Option<T> {
+    fn type_of() -> Type {
+        Type::optional(T::type_of())
     }
 }
 
@@ -142,10 +149,7 @@ pub trait Resource: TypeOf {
     type State: Send + Sync + TypeOf + Serialize + for<'a> Deserialize<'a>;
 
     fn resource_id(&self, arg: &Self::Arguments) -> ResourceId {
-        ResourceId::new(
-            Self::State::type_of(),
-            self.id(arg),
-        )
+        ResourceId::new(Self::State::type_of(), self.id(arg))
     }
 
     fn id(&self, arg: &Self::Arguments) -> String;

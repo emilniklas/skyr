@@ -22,7 +22,7 @@ impl Plugin for List {
             Type::record([
                 ("first", {
                     let t = Type::open();
-                    Type::function([Type::list(t.clone())], t)
+                    Type::function([Type::list(t.clone())], Type::optional(t))
                 }),
                 ("range", {
                     Type::function([Type::Integer], Type::list(Type::Integer))

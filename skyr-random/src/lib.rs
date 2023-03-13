@@ -34,15 +34,7 @@ impl Plugin for Random {
     }
 
     async fn delete_matching_resource(&self, resource: &ResourceState) -> io::Result<Option<()>> {
-        if resource.has_type(&Identifier::type_of()) {
-            Ok(Some(
-                IdentifierResource
-                    .delete(resource.state.deserialize().unwrap())
-                    .await?,
-            ))
-        } else {
-            Ok(None)
-        }
+        IdentifierResource.try_match_delete(resource).await
     }
 }
 
@@ -50,7 +42,7 @@ impl Plugin for Random {
 #[serde(rename_all = "camelCase")]
 struct IdentifierArgs {
     name: String,
-    byte_length: usize,
+    byte_length: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, TypeOf)]
@@ -74,7 +66,7 @@ impl Resource for IdentifierResource {
     }
 
     async fn create(&self, arg: Self::Arguments) -> io::Result<Self::State> {
-        let mut bytes = vec![0u8; arg.byte_length];
+        let mut bytes = vec![0u8; arg.byte_length.unwrap_or(4)];
         rand::thread_rng().fill_bytes(&mut bytes);
 
         Ok(Identifier {

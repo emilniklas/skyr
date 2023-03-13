@@ -25,6 +25,7 @@ pub enum TokenKind<'a> {
     Comma,
     Period,
     EqualSign,
+    QuestionMark,
 
     LessThanOrEqualSign,
     GreaterThanOrEqualSign,
@@ -47,6 +48,7 @@ pub enum TokenKind<'a> {
     ElseKeyword,
     AndKeyword,
     OrKeyword,
+    NilKeyword,
 
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
@@ -166,6 +168,7 @@ impl<'a> Lexer<'a> {
             Some(':') => TokenKind::Colon,
             Some('.') => TokenKind::Period,
             Some('=') => TokenKind::EqualSign,
+            Some('?') => TokenKind::QuestionMark,
 
             Some('+') => TokenKind::Plus,
             Some('-') => TokenKind::Minus,
@@ -225,6 +228,7 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::ElseKeyword,
             "and" => TokenKind::AndKeyword,
             "or" => TokenKind::OrKeyword,
+            "nil" => TokenKind::NilKeyword,
             _ => TokenKind::Symbol(symbol),
         }
     }

@@ -41,11 +41,12 @@ async fn main() -> io::Result<ExitCode> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .into_iter()
             .filter_map(|d| d.ok())
-            .map(|dylib| {
+            .enumerate()
+            .map(|(idx, dylib)| {
                 let lib = libloading::Library::new(dylib).unwrap();
-                let func: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> =
+                let func: libloading::Symbol<unsafe extern "C" fn(u64) -> *mut dyn Plugin> =
                     lib.get(b"skyr_plugin").unwrap();
-                Box::from_raw(func())
+                Box::from_raw(func(idx as _))
             })
             .collect()
     };

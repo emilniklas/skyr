@@ -46,6 +46,8 @@ pub trait Visitor<'a> {
 
     fn visit_boolean_literal(&mut self, boolean_literal: &'a BooleanLiteral) {}
 
+    fn visit_nil(&mut self, nil: &'a Nil) {}
+
     fn enter_member_access(&mut self, member_access: &'a MemberAccess) {}
     fn leave_member_access(&mut self, member_access: &'a MemberAccess) {}
 
@@ -101,6 +103,9 @@ pub trait Visitor<'a> {
 
     fn enter_list_type_expression(&mut self, type_: &'a ListTypeExpression) {}
     fn leave_list_type_expression(&mut self, type_: &'a ListTypeExpression) {}
+
+    fn enter_optional_type_expression(&mut self, type_: &'a OptionalTypeExpression) {}
+    fn leave_optional_type_expression(&mut self, type_: &'a OptionalTypeExpression) {}
 }
 
 pub trait Visitable {
@@ -325,6 +330,7 @@ pub enum Expression {
     Call(Box<Call>),
     BinaryOperation(Box<BinaryOperation>),
     List(List),
+    Nil(Nil),
 }
 
 impl Visitable for Expression {
@@ -342,6 +348,7 @@ impl Visitable for Expression {
             Expression::Call(n) => n.visit(visitor),
             Expression::BinaryOperation(n) => n.visit(visitor),
             Expression::List(n) => n.visit(visitor),
+            Expression::Nil(n) => n.visit(visitor),
         }
         visitor.leave_expression(self);
     }
@@ -361,6 +368,7 @@ impl HasSpan for Expression {
             Expression::Call(n) => n.span.clone(),
             Expression::BinaryOperation(n) => n.span.clone(),
             Expression::List(n) => n.span.clone(),
+            Expression::Nil(n) => n.span.clone(),
         }
     }
 }
@@ -418,6 +426,14 @@ impl Parser for LeafExpression {
             }) => {
                 let (function, tokens) = Function::parse(tokens)?;
                 Ok((Expression::Function(Box::new(function)), tokens))
+            }
+
+            Some(Token {
+                kind: TokenKind::NilKeyword,
+                ..
+            }) => {
+                let (nil, tokens) = Nil::parse(tokens)?;
+                Ok((Expression::Nil(nil), tokens))
             }
 
             Some(Token {
@@ -977,6 +993,7 @@ pub enum TypeExpression {
     Identifier(Identifier),
     Record(Record<TypeExpression>),
     List(Box<ListTypeExpression>),
+    Optional(Box<OptionalTypeExpression>),
 }
 
 impl Visitable for TypeExpression {
@@ -986,6 +1003,7 @@ impl Visitable for TypeExpression {
             TypeExpression::Identifier(id) => id.visit(visitor),
             TypeExpression::Record(r) => r.visit(visitor),
             TypeExpression::List(l) => l.visit(visitor),
+            TypeExpression::Optional(o) => o.visit(visitor),
         }
         visitor.leave_type_expression(self);
     }
@@ -997,12 +1015,15 @@ impl HasSpan for TypeExpression {
             TypeExpression::Identifier(id) => id.span.clone(),
             TypeExpression::Record(r) => r.span.clone(),
             TypeExpression::List(l) => l.span.clone(),
+            TypeExpression::Optional(o) => o.span.clone(),
         }
     }
 }
 
-impl Parser for TypeExpression {
-    type Output = Self;
+struct LeafTypeExpression;
+
+impl Parser for LeafTypeExpression {
+    type Output = TypeExpression;
 
     fn parse<'a>(tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
         match tokens.get(0) {
@@ -1034,6 +1055,32 @@ impl Parser for TypeExpression {
                 "type expression",
                 t.map(|t| t.span.clone()),
             )),
+        }
+    }
+}
+
+impl Parser for TypeExpression {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let mut type_;
+        (type_, tokens) = LeafTypeExpression::parse(tokens)?;
+
+        loop {
+            match tokens.get(0) {
+                Some(Token {
+                    kind: TokenKind::QuestionMark,
+                    span,
+                }) => {
+                    tokens = &tokens[1..];
+                    type_ = TypeExpression::Optional(Box::new(OptionalTypeExpression {
+                        span: type_.span().start..span.end,
+                        type_,
+                    }));
+                }
+
+                _ => return Ok((type_, tokens)),
+            }
         }
     }
 }
@@ -1912,5 +1959,49 @@ impl Parser for ListTypeExpression {
             },
             tokens,
         ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OptionalTypeExpression {
+    pub span: Span,
+    pub type_: TypeExpression,
+}
+
+impl Visitable for OptionalTypeExpression {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_optional_type_expression(self);
+        self.type_.visit(visitor);
+        visitor.leave_optional_type_expression(self);
+    }
+}
+
+#[derive(Debug)]
+pub struct Nil {
+    pub span: Span,
+}
+
+impl Visitable for Nil {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.visit_nil(self);
+    }
+}
+
+impl Parser for Nil {
+    type Output = Self;
+
+    fn parse<'a>(tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        if let Some(Token {
+            kind: TokenKind::NilKeyword,
+            span,
+        }) = tokens.get(0)
+        {
+            Ok((Nil { span: span.clone() }, &tokens[1..]))
+        } else {
+            Err(ParseError::Expected(
+                "nil keyword",
+                tokens.get(0).map(|t| t.span.clone()),
+            ))
+        }
     }
 }

@@ -13,7 +13,6 @@ pub struct ValueSerializer;
 pub enum SerializationError {
     Other(String),
     StringToChar,
-    MissingField,
 }
 
 impl std::error::Error for SerializationError {}
@@ -527,7 +526,11 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: serde::de::Visitor<'de>,
     {
-        todo!()
+        if let Value::Primitive(Primitive::Nil) = self.value {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
     }
 
     fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -617,7 +620,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
                         continue 'fields;
                     }
                 }
-                return Err(SerializationError::MissingField);
+                values.push(&Value::Primitive(Primitive::Nil));
             }
 
             visitor.visit_seq(ListValueDeserializer {
@@ -725,7 +728,10 @@ mod tests {
             x: i64,
             y: String,
         }
-        let input = X { x: 12354, y: "hello".into() };
+        let input = X {
+            x: 12354,
+            y: "hello".into(),
+        };
         let value = Value::serialize(&input).unwrap();
         let output: X = value.deserialize().unwrap();
         assert_eq!(output, input);

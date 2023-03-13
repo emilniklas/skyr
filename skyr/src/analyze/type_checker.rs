@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::identity;
 use std::fmt;
@@ -67,6 +68,12 @@ impl<'a> TypeEnvironment<'a> {
             (Type::String, Type::String) => Type::String,
             (Type::Integer, Type::Integer) => Type::Integer,
             (Type::Boolean, Type::Boolean) => Type::Boolean,
+            (Type::Optional(lhs), Type::Optional(rhs)) => Type::Optional(Box::new(
+                self.do_unify(*lhs, lhs_wrap, *rhs, rhs_wrap, span),
+            )),
+            (Type::Optional(lhs), rhs) => {
+                Type::Optional(Box::new(self.do_unify(*lhs, lhs_wrap, rhs, rhs_wrap, span)))
+            }
             (Type::List(lhs), Type::List(rhs)) => Type::List(Box::new(
                 self.do_unify(*lhs, lhs_wrap, *rhs, rhs_wrap, span),
             )),
@@ -76,10 +83,12 @@ impl<'a> TypeEnvironment<'a> {
                 let params = (0..arity)
                     .map(|idx| {
                         self.do_unify(
-                            lhs_a[idx].clone(),
-                            lhs_wrap,
+                            // Here, lhs and rhs are swapped. This is because
+                            // params are contravariant.
                             rhs_a[idx].clone(),
                             rhs_wrap,
+                            lhs_a[idx].clone(),
+                            lhs_wrap,
                             span,
                         )
                     })
@@ -93,7 +102,13 @@ impl<'a> TypeEnvironment<'a> {
                     });
                 }
 
-                let return_type = self.do_unify(*lhs_r, lhs_wrap, *rhs_r, rhs_wrap, span);
+                let return_type = self.do_unify(
+                    self.resolve(*lhs_r),
+                    lhs_wrap,
+                    self.resolve(*rhs_r),
+                    rhs_wrap,
+                    span,
+                );
 
                 Type::Function(params, Box::new(return_type))
             }
@@ -127,23 +142,33 @@ impl<'a> TypeEnvironment<'a> {
                         }
                     }
                     result.push((lhn.clone(), lht.clone()));
-                    self.errors.push(TypeError::MissingField {
-                        lhs: lhs_wrap(Type::Record(lhf.clone())),
-                        rhs: rhs_wrap(Type::Record(rhf.clone())),
-                        field: lhn.clone(),
-                        span: span.clone(),
-                    });
+
+                    if let Type::Optional(_) = lht {
+                    } else {
+                        self.errors.push(TypeError::MissingField {
+                            lhs: lhs_wrap(Type::Record(lhf.clone())),
+                            rhs: rhs_wrap(Type::Record(rhf.clone())),
+                            field: lhn.clone(),
+                            span: span.clone(),
+                        });
+                    }
                 }
                 self.resolve(Type::Record(result))
             }
-            (Type::Open(lhs), rhs) => {
-                self.bindings.insert(lhs, rhs_wrap(rhs.clone()));
-                rhs
-            }
-            (lhs, Type::Open(rhs)) => {
-                self.bindings.insert(rhs, lhs_wrap(lhs.clone()));
-                lhs
-            }
+            (Type::Open(lhs), rhs) => match self.bindings.get(&lhs).cloned() {
+                None => {
+                    self.bindings.insert(lhs, rhs_wrap(rhs.clone()));
+                    rhs
+                }
+                Some(lhs) => self.do_unify(lhs, lhs_wrap, rhs, rhs_wrap, span),
+            },
+            (lhs, Type::Open(rhs)) => match self.bindings.get(&rhs).cloned() {
+                None => {
+                    self.bindings.insert(rhs, lhs_wrap(lhs.clone()));
+                    lhs
+                }
+                Some(rhs) => self.do_unify(lhs, lhs_wrap, rhs, rhs_wrap, span),
+            },
             (lhs, rhs) => {
                 self.errors.push(TypeError::Mismatch {
                     lhs: lhs_wrap(lhs.clone()),
@@ -190,6 +215,7 @@ impl<'a> TypeEnvironment<'a> {
                     .collect(),
                 Box::new(self.do_resolve(*r, seen_ids)),
             ),
+            Type::Optional(t) => Type::Optional(Box::new(self.do_resolve(*t, seen_ids))),
         }
     }
 }
@@ -351,6 +377,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             Expression::MemberAccess(ma) => self.check_member_access(ma),
             Expression::BinaryOperation(op) => self.check_binary_operation(op),
             Expression::List(list) => self.check_list(list),
+            Expression::Nil(_) => Type::Optional(Box::new(Type::open())),
         }
     }
 
@@ -497,6 +524,10 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
             TypeExpression::List(l) => {
                 Type::List(Box::new(self.check_type_expression(&l.element_type)))
             }
+            TypeExpression::Optional(o) => {
+                let type_ = self.check_type_expression(&o.type_);
+                Type::Optional(Box::new(type_))
+            }
         }
     }
 
@@ -592,6 +623,10 @@ impl TypeId {
     pub fn new() -> Self {
         Self(ID_GEN.fetch_add(1, SeqCst))
     }
+
+    pub fn preload(i: u64) {
+        ID_GEN.fetch_add(1000 * i, SeqCst);
+    }
 }
 
 impl Default for TypeId {
@@ -617,14 +652,10 @@ pub enum Type {
     Named(String, Box<Type>),
     Function(Vec<Type>, Box<Type>),
     List(Box<Type>),
+    Optional(Box<Type>),
 }
 
 impl Type {
-    const TYPE_VAR_CHARS: [char; 26] = [
-        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
-        's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-    ];
-
     pub fn open() -> Self {
         Self::Open(Default::default())
     }
@@ -634,15 +665,19 @@ impl Type {
     }
 
     pub fn function(a: impl IntoIterator<Item = Type>, r: Type) -> Self {
-        Type::Function(a.into_iter().collect(), Box::new(r))
+        Self::Function(a.into_iter().collect(), Box::new(r))
+    }
+
+    pub fn optional(t: impl Into<Type>) -> Self {
+        Self::Optional(Box::new(t.into()))
     }
 
     pub fn record(i: impl IntoIterator<Item = (impl Into<String>, Type)>) -> Self {
         Self::Record(i.into_iter().map(|(n, t)| (n.into(), t)).collect())
     }
 
-    pub fn list(t: Type) -> Self {
-        Self::List(Box::new(t))
+    pub fn list(t: impl Into<Type>) -> Self {
+        Self::List(Box::new(t.into()))
     }
 
     pub fn return_type(&self) -> &Type {
@@ -652,26 +687,48 @@ impl Type {
             panic!("{:?} is not a function", self)
         }
     }
+}
 
-    fn pretty_fmt(&self, f: &mut fmt::Formatter, open_types: &mut Vec<TypeId>) -> fmt::Result {
-        match self {
+struct PrettyTypeDebug<'a> {
+    type_: &'a Type,
+    open_types: &'a RefCell<Vec<TypeId>>,
+}
+
+impl<'a> PrettyTypeDebug<'a> {
+    const TYPE_VAR_CHARS: [char; 26] = [
+        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
+        's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    ];
+
+    pub fn inner<'b>(&'b self, type_: &'b Type) -> PrettyTypeDebug {
+        PrettyTypeDebug {
+            type_,
+            open_types: self.open_types,
+        }
+    }
+}
+
+impl<'a> fmt::Debug for PrettyTypeDebug<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.type_ {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
             Type::Integer => write!(f, "Integer"),
             Type::Boolean => write!(f, "Boolean"),
             Type::List(element) => {
                 let mut s = f.debug_list();
-                s.entry(&element);
+                s.entry(&self.inner(&element));
                 s.finish()
             }
             Type::Record(fields) => {
                 let mut s = f.debug_map();
                 for field in fields {
-                    s.entry(&DisplayAsDebug(&field.0), &field.1);
+                    s.entry(&DisplayAsDebug(&field.0), &self.inner(&field.1));
                 }
                 s.finish()
             }
             Type::Open(id) => {
+                let mut open_types = self.open_types.borrow_mut();
                 let idx = open_types
                     .iter()
                     .enumerate()
@@ -684,19 +741,23 @@ impl Type {
                     });
                 let idx = idx % Self::TYPE_VAR_CHARS.len();
                 let ch = Self::TYPE_VAR_CHARS[idx];
-                write!(f, "{}", ch)
+                write!(f, "{}{:?}", ch, id)
             }
             Type::Named(n, _) => write!(f, "{}", n),
             Type::Function(p, r) => {
                 let mut t = f.debug_tuple("");
                 for param in p {
-                    t.field(param);
+                    t.field(&self.inner(param));
                 }
                 t.finish()?;
 
                 write!(f, " -> ")?;
 
-                r.pretty_fmt(f, open_types)
+                self.inner(r).fmt(f)
+            }
+            Type::Optional(t) => {
+                self.inner(t).fmt(f)?;
+                write!(f, "?")
             }
         }
     }
@@ -710,6 +771,10 @@ impl Default for Type {
 
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.pretty_fmt(f, &mut vec![])
+        PrettyTypeDebug {
+            type_: self,
+            open_types: &mut Default::default(),
+        }
+        .fmt(f)
     }
 }

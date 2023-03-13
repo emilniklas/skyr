@@ -22,8 +22,8 @@ pub use value::*;
 mod serde;
 pub use crate::serde::*;
 
-pub mod compile;
 pub mod analyze;
+pub mod compile;
 pub mod execute;
 
 pub(crate) struct DisplayAsDebug<T>(T);
