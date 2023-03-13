@@ -1,7 +1,15 @@
 import Random
+import FileSystem
 
 id = Random.Identifier {
-  name: "test"
+  name: "test2"
 }
 
-debug id.hex
+dir = FileSystem.Directory {
+  path: "dirsa-" + id.hex
+}
+
+FileSystem.File {
+  path: dir.path + "/file2.txt"
+  content: "Hello, Worlds!\n"
+}

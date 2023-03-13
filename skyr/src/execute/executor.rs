@@ -704,6 +704,10 @@ impl<'a> RuntimeValue<'a> {
     ) -> Self {
         Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a).await })))
     }
+
+    pub fn record(r: impl IntoIterator<Item = (impl Into<String>, impl Into<Self>)>) -> Self {
+        Self::Collection(Collection::record(r))
+    }
 }
 
 impl<'a> fmt::Debug for RuntimeValue<'a> {

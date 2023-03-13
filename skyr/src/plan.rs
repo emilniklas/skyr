@@ -187,11 +187,12 @@ impl<'a> Plan<'a> {
                     Ok(())
                 })),
                 PlanStepKind::Delete(f) => fo.push(Box::pin(async move {
-                    if let Some(resource) = state.remove(&id) {
+                    if let Some(resource) = state.get(&id) {
                         f(id.clone(), resource.state)
                             .await
                             .map_err(|e| ResourceError(resource.id, e))?;
                     }
+                    state.remove(&id);
                     drop(tx);
                     events_tx
                         .send(PlanExecutionEvent::Deleted(
