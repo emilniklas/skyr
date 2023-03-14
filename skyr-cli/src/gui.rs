@@ -1,24 +1,28 @@
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_std::sync::Mutex;
 use colored::{Color, Colorize};
-use skyr::{Collection, Diff, Plan, Primitive, ResourceState, Value};
+use skyr::{
+    Collection, Diff, Plan, PlanExecutionEvent, Primitive, ResourceError, ResourceState, Value,
+};
 
-pub struct Gui<W> {
-    w: Arc<Mutex<GuiState<W>>>,
+pub struct Gui<R, W> {
+    s: Arc<Mutex<GuiState<R, W>>>,
 }
 
-impl<W> Clone for Gui<W> {
+impl<R, W> Clone for Gui<R, W> {
     fn clone(&self) -> Self {
-        Gui { w: self.w.clone() }
+        Gui { s: self.s.clone() }
     }
 }
 
-impl<W: Write> Gui<W> {
-    pub fn new(w: W) -> Self {
+impl<R: Read, W: Write> Gui<R, W> {
+    pub fn new(r: R, w: W) -> Self {
         Self {
-            w: Arc::new(Mutex::new(GuiState {
+            s: Arc::new(Mutex::new(GuiState {
+                r: BufReader::new(r),
                 w,
                 indentation: 0,
                 value_color: None,
@@ -27,25 +31,48 @@ impl<W: Write> Gui<W> {
     }
 
     pub async fn print_io_error(&self, error: io::Error) -> io::Result<()> {
-        self.w.lock().await.print_io_error(error)
+        self.s.lock().await.print_io_error(error)
     }
 
     pub async fn print_plan<'a>(&self, plan: &Plan<'a>) -> io::Result<()> {
-        self.w.lock().await.print_plan(plan)
+        self.s.lock().await.print_plan(plan)
     }
 
     pub async fn print_resource_state(&self, state: &ResourceState) -> io::Result<()> {
-        self.w.lock().await.print_resource_state(state)
+        self.s.lock().await.print_resource_state(state)
+    }
+
+    pub async fn print_plan_execution_event(&self, event: PlanExecutionEvent) -> io::Result<()> {
+        self.s.lock().await.print_plan_execution_event(event)
+    }
+
+    pub async fn confirm(&self) -> io::Result<bool> {
+        let confirmed = self.s.lock().await.confirm()?;
+        if confirmed {
+            async_std::task::sleep(Duration::from_millis(400)).await;
+        }
+        Ok(confirmed)
+    }
+
+    pub async fn print_resource_errors(
+        &self,
+        errors: impl IntoIterator<Item = ResourceError>,
+    ) -> io::Result<()> {
+        self.s
+            .lock()
+            .await
+            .print_resource_errors(errors.into_iter().collect())
     }
 }
 
-struct GuiState<W> {
+struct GuiState<R, W> {
+    r: BufReader<R>,
     w: W,
     indentation: usize,
     value_color: Option<Color>,
 }
 
-impl<W: Write> GuiState<W> {
+impl<R: Read, W: Write> GuiState<R, W> {
     pub fn print_io_error(&mut self, error: io::Error) -> io::Result<()> {
         write!(self.w, "{:?}", error)
     }
@@ -60,8 +87,12 @@ impl<W: Write> GuiState<W> {
             return Ok(());
         }
 
-        if plan.is_continuation() {
-            writeln!(self.w, "{}", "===============".bright_black())?;
+        if !plan.is_continuation() {
+            writeln!(
+                self.w,
+                "{}",
+                "═══════════════════════════════════════".bright_black()
+            )?;
         }
 
         writeln!(
@@ -71,7 +102,12 @@ impl<W: Write> GuiState<W> {
                 .bright_yellow()
                 .bold()
         )?;
-        writeln!(self.w, "{}", "---------------".bright_black())?;
+        writeln!(
+            self.w,
+            "{}",
+            "———————————————————————————————————————".bright_black()
+        )?;
+        self.print_newline()?;
 
         let mut num_to_be_created = 0;
         let mut num_to_be_updated = 0;
@@ -119,10 +155,11 @@ impl<W: Write> GuiState<W> {
             )?;
         }
 
+        self.print_newline()?;
         writeln!(
             self.w,
             "{}\n{}",
-            "---------------".bright_black(),
+            "———————————————————————————————————————".bright_black(),
             "SUMMARY".bright_yellow().bold()
         )?;
 
@@ -275,5 +312,71 @@ impl<W: Write> GuiState<W> {
         write!(self.w, "{} ", format!("{:?}", state.id.type_).bold(),)?;
         self.print_value(&state.state)?;
         self.print_newline()
+    }
+
+    pub fn confirm(&mut self) -> io::Result<bool> {
+        write!(self.w, "{} ", "\n  Continue?".bold())?;
+        self.w.flush()?;
+        let mut line = String::new();
+        self.r.read_line(&mut line)?;
+        self.print_newline()?;
+        Ok(line == "yes\n")
+    }
+
+    pub fn print_plan_execution_event(&mut self, event: PlanExecutionEvent) -> io::Result<()> {
+        match event {
+            PlanExecutionEvent::Done(d) => writeln!(
+                self.w,
+                "{}\n{} in {}\n{}",
+                "———————————————————————————————————————".bright_black(),
+                "Done".bold(),
+                format!("{:?}", d).bold().bright_yellow(),
+                "═══════════════════════════════════════".bright_black()
+            ),
+
+            PlanExecutionEvent::Created(id, d) => writeln!(
+                self.w,
+                "{} {} {} in {}",
+                "Created".bold().bright_green(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
+
+            PlanExecutionEvent::Updated(id, d) => writeln!(
+                self.w,
+                "{} {} {} in {}",
+                "Updated".bold().bright_yellow(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
+
+            PlanExecutionEvent::Deleted(id, d) => writeln!(
+                self.w,
+                "{} {} {} in {}",
+                "Deleted".bold().bright_red(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
+
+            _ => writeln!(self.w, "{:?}", event),
+        }
+    }
+
+    pub fn print_resource_error(
+        &mut self,
+        ResourceError(resource_id, error): ResourceError,
+    ) -> io::Result<()> {
+        write!(self.w, "{} ", format!("{:?}", resource_id.type_).bold(),)?;
+        self.print_io_error(error)
+    }
+
+    pub fn print_resource_errors(&mut self, errors: Vec<ResourceError>) -> io::Result<()> {
+        for error in errors {
+            self.print_resource_error(error)?;
+        }
+        Ok(())
     }
 }

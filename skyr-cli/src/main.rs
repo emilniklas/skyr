@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use async_std::stream::StreamExt;
@@ -38,7 +38,7 @@ enum StateCommand {
 
 #[async_std::main]
 async fn main() -> io::Result<ExitCode> {
-    let gui = Gui::new(io::stdout());
+    let gui = Gui::new(io::stdin(), io::stdout());
 
     match do_main(gui.clone()).await {
         Err(e) => {
@@ -49,7 +49,9 @@ async fn main() -> io::Result<ExitCode> {
     }
 }
 
-async fn do_main(gui: Gui<impl Write>) -> io::Result<ExitCode> {
+async fn do_main(
+    gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
+) -> io::Result<ExitCode> {
     let SkyrCli { command } = Parser::parse();
 
     let plugins = unsafe {
@@ -76,7 +78,7 @@ async fn do_main(gui: Gui<impl Write>) -> io::Result<ExitCode> {
 }
 
 async fn teardown(
-    gui: Gui<impl Write>,
+    gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
     plugins: Vec<Box<dyn Plugin>>,
 ) -> io::Result<ExitCode> {
@@ -104,28 +106,27 @@ async fn teardown(
 
     gui.print_plan(&plan).await?;
 
-    let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
-    if !approve {
-        print!("\nContinue? ");
-        io::stdout().flush()?;
-        let mut line = String::new();
-        stdin.read_line(&mut line)?;
+    if plan.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
 
-        if line != "yes\n" {
-            return Ok(ExitCode::FAILURE);
-        }
+    if !(approve || gui.confirm().await?) {
+        return Ok(ExitCode::FAILURE);
     }
 
     let (tx, mut rx) = async_std::channel::unbounded();
 
-    let join = async_std::task::spawn(async move {
-        while let Some(event) = rx.next().await {
-            println!("{:?}", event);
+    let join = async_std::task::spawn({
+        let gui = gui.clone();
+        async move {
+            while let Some(event) = rx.next().await {
+                gui.print_plan_execution_event(event).await.unwrap_or(());
+            }
         }
     });
 
     if let Err(e) = plan.execute_once(&state, tx).await {
-        println!("{:?}", e);
+        gui.print_resource_errors(e).await?;
         join.await;
         return Ok(ExitCode::FAILURE);
     }
@@ -163,7 +164,11 @@ async fn state() -> State {
 
 async fn save_state(state: State) -> io::Result<()> {
     if state.is_empty() {
-        std::fs::remove_file(STATEFILE)
+        match std::fs::remove_file(STATEFILE) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+            Ok(()) => Ok(()),
+        }
     } else {
         state.save(
             std::fs::OpenOptions::new()
@@ -174,7 +179,7 @@ async fn save_state(state: State) -> io::Result<()> {
     }
 }
 
-async fn inspect_state(gui: Gui<impl Write>) -> io::Result<ExitCode> {
+async fn inspect_state(gui: Gui<impl Read, impl Write>) -> io::Result<ExitCode> {
     let state = state().await;
     let resources = state.into_resources();
     for resource in resources.values() {
@@ -183,7 +188,10 @@ async fn inspect_state(gui: Gui<impl Write>) -> io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn plan(gui: Gui<impl Write>, plugins: Vec<Box<dyn Plugin>>) -> io::Result<ExitCode> {
+async fn plan(
+    gui: Gui<impl Read, impl Write>,
+    plugins: Vec<Box<dyn Plugin>>,
+) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
 
     let program = skyr::Program::new(sources?)
@@ -196,7 +204,7 @@ async fn plan(gui: Gui<impl Write>, plugins: Vec<Box<dyn Plugin>>) -> io::Result
     let plan = match program.plan(&state).await {
         Ok(p) => p,
         Err(errors) => {
-            println!("{:?}", errors);
+            gui.print_resource_errors(errors).await?;
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -210,7 +218,7 @@ async fn plan(gui: Gui<impl Write>, plugins: Vec<Box<dyn Plugin>>) -> io::Result
 }
 
 async fn apply(
-    gui: Gui<impl Write>,
+    gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
     plugins: Vec<Box<dyn Plugin>>,
 ) -> io::Result<ExitCode> {
@@ -225,11 +233,10 @@ async fn apply(
 
     let mut exit_code = ExitCode::SUCCESS;
     {
-        let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let mut plan = match program.plan(&state).await {
             Ok(p) => p,
             Err(e) => {
-                println!("{:?}", e);
+                gui.print_resource_errors(e).await?;
                 return Ok(ExitCode::FAILURE);
             }
         };
@@ -237,30 +244,26 @@ async fn apply(
         gui.print_plan(&plan).await?;
 
         while !plan.is_empty() {
-            if !approve {
-                print!("\nContinue? ");
-                io::stdout().flush()?;
-                let mut line = String::new();
-                stdin.read_line(&mut line)?;
-
-                if line != "yes\n" {
-                    exit_code = ExitCode::FAILURE;
-                    break;
-                }
+            if !(approve || gui.confirm().await?) {
+                exit_code = ExitCode::FAILURE;
+                break;
             }
 
             let (tx, mut rx) = async_std::channel::unbounded();
 
-            let join = async_std::task::spawn(async move {
-                while let Some(event) = rx.next().await {
-                    println!("{:?}", event);
+            let join = async_std::task::spawn({
+                let gui = gui.clone();
+                async move {
+                    while let Some(event) = rx.next().await {
+                        gui.print_plan_execution_event(event).await.unwrap_or(());
+                    }
                 }
             });
 
             plan = match plan.execute(&program, &state, tx).await {
                 Ok(p) => p,
                 Err(e) => {
-                    println!("{:?}", e);
+                    gui.print_resource_errors(e).await?;
                     exit_code = ExitCode::FAILURE;
                     break;
                 }
