@@ -361,7 +361,35 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 format!("{:?}", d).bold().bright_yellow(),
             ),
 
-            _ => writeln!(self.w, "{:?}", event),
+            PlanExecutionEvent::Creating(id, d) => writeln!(
+                self.w,
+                "  {} {} {} {} after {}",
+                "-".bright_black(),
+                "Still creating".bright_green(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
+
+            PlanExecutionEvent::Updating(id, d) => writeln!(
+                self.w,
+                "  {} {} {} {} after {}",
+                "-".bright_black(),
+                "Still updating".bright_yellow(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
+
+            PlanExecutionEvent::Deleting(id, d) => writeln!(
+                self.w,
+                "  {} {} {} {} after {}",
+                "-".bright_black(),
+                "Still deleting".bright_red(),
+                format!("{:?}", id.type_).bold(),
+                format!("{:?}", id.id).bright_blue(),
+                format!("{:?}", d).bold().bright_yellow(),
+            ),
         }
     }
 

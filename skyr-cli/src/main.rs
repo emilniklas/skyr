@@ -133,7 +133,7 @@ async fn teardown(
 
     join.await;
 
-    save_state(state).await?;
+    save_state(&state).await?;
 
     Ok(ExitCode::SUCCESS)
 }
@@ -162,7 +162,7 @@ async fn state() -> State {
         .unwrap_or_default()
 }
 
-async fn save_state(state: State) -> io::Result<()> {
+async fn save_state(state: &State) -> io::Result<()> {
     if state.is_empty() {
         match std::fs::remove_file(STATEFILE) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -271,11 +271,13 @@ async fn apply(
 
             join.await;
 
+            save_state(&state).await?;
+
             gui.print_plan(&plan).await?;
         }
     }
 
-    save_state(state).await?;
+    save_state(&state).await?;
 
     Ok(exit_code)
 }

@@ -46,7 +46,7 @@ impl State {
         bincode::deserialize_from(reader).map_err(Self::bincode_to_io_error)
     }
 
-    pub fn save(self, writer: impl io::Write) -> io::Result<()> {
+    pub fn save(&self, writer: impl io::Write) -> io::Result<()> {
         bincode::serialize_into(writer, &self).map_err(Self::bincode_to_io_error)
     }
 
