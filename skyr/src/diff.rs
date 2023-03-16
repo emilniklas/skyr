@@ -11,6 +11,7 @@ pub enum Diff<'a> {
 
     Record(Vec<(&'a str, Diff<'a>)>),
     List(Vec<Diff<'a>>),
+    Tuple(Vec<Diff<'a>>),
 }
 
 impl<'a> Diff<'a> {
@@ -58,6 +59,21 @@ impl<'a> Diff<'a> {
                 }
                 Diff::List(diff)
             }
+            (
+                Value::Collection(Collection::Tuple(old)),
+                Value::Collection(Collection::Tuple(new)),
+            ) => {
+                let mut diff = vec![];
+                for i in 0..old.len().max(new.len()) {
+                    match (old.get(i), new.get(i)) {
+                        (None, None) => {}
+                        (Some(old), Some(new)) => diff.push(Diff::calculate(old, new)),
+                        (None, Some(new)) => diff.push(Diff::Added(new)),
+                        (Some(old), None) => diff.push(Diff::Removed(old)),
+                    }
+                }
+                Diff::Tuple(diff)
+            }
 
             (Value::Primitive(o), Value::Primitive(n)) if o == n => Diff::Unchanged(new),
 
@@ -87,6 +103,13 @@ impl<'a> fmt::Debug for Diff<'a> {
                 let mut m = f.debug_map();
                 for (n, d) in r {
                     m.entry(&DisplayAsDebug(n), d);
+                }
+                m.finish()
+            }
+            Diff::Tuple(l) => {
+                let mut m = f.debug_tuple("");
+                for d in l {
+                    m.field(d);
                 }
                 m.finish()
             }

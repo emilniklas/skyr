@@ -232,6 +232,17 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 self.print_newline()?;
                 write!(self.w, "]")
             }
+            Diff::Tuple(l) => {
+                write!(self.w, "(")?;
+                self.indentation += 1;
+                for element in l {
+                    self.print_newline()?;
+                    self.print_diff(element)?;
+                }
+                self.indentation -= 1;
+                self.print_newline()?;
+                write!(self.w, ")")
+            }
             Diff::Record(r) => {
                 write!(self.w, "{{")?;
                 self.indentation += 1;
