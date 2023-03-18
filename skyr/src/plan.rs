@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use async_std::channel::Receiver;
 use async_std::channel::Sender;
+use async_std::sync::RwLock;
 use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
@@ -155,106 +158,174 @@ impl<'a> Plan<'a> {
         self.debug_messages.push((span, value));
     }
 
+    fn emit_events(
+        start: Instant,
+        events_tx: Sender<PlanExecutionEvent>,
+        initial_event: PlanExecutionEvent,
+    ) -> impl Future<Output = ()> {
+        let (tx, rx) = async_std::channel::bounded::<()>(1);
+
+        let handle = async_std::task::spawn(async move {
+            let mut event = initial_event;
+
+            let mut done = Box::pin(rx.recv());
+            loop {
+                match futures::future::select(
+                    Box::pin(async {
+                        async_std::task::sleep(Duration::from_secs(2)).await;
+                    }),
+                    done,
+                )
+                .await
+                {
+                    Either::Left((_, l)) => {
+                        done = l;
+                    }
+                    Either::Right(_) => break,
+                }
+
+                match &mut event {
+                    PlanExecutionEvent::Creating(_, d)
+                    | PlanExecutionEvent::Updating(_, d)
+                    | PlanExecutionEvent::Deleting(_, d) => {
+                        *d = Instant::now().duration_since(start)
+                    }
+                    _ => {}
+                }
+                events_tx.send(event.clone()).await.unwrap_or(());
+            }
+        });
+
+        async move {
+            drop(tx);
+            handle.await;
+        }
+    }
+
+    async fn execute_step<'e>(
+        state: &'a State,
+        events_tx: Sender<PlanExecutionEvent>,
+        (id, dependencies, kind): (ResourceId, Vec<ResourceId>, PlanStepKind<'a>),
+        pending_steps: &'e RwLock<BTreeMap<ResourceId, Receiver<()>>>,
+    ) -> Result<(), ResourceError> {
+        {
+            let pending_steps = pending_steps.read().await;
+            for dep in dependencies {
+                if let Some(rx) = pending_steps.get(&dep) {
+                    rx.recv().await.unwrap_or(());
+                }
+            }
+        }
+
+        let template_event = match &kind {
+            PlanStepKind::Create(_, _) => PlanExecutionEvent::Creating(id.clone(), Duration::ZERO),
+            PlanStepKind::Update(_, _, _) => {
+                PlanExecutionEvent::Updating(id.clone(), Duration::ZERO)
+            }
+            PlanStepKind::Delete(_) => PlanExecutionEvent::Deleting(id.clone(), Duration::ZERO),
+        };
+
+        let start = Instant::now();
+        let stop_emitting_events =
+            Self::emit_events(start.clone(), events_tx.clone(), template_event);
+
+        match kind {
+            PlanStepKind::Create(_, f) => {
+                state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
+                events_tx
+                    .send(PlanExecutionEvent::Created(
+                        id,
+                        Instant::now().duration_since(start),
+                    ))
+                    .await
+                    .unwrap_or(());
+            }
+            PlanStepKind::Update(_, _, f) => {
+                state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
+                events_tx
+                    .send(PlanExecutionEvent::Updated(
+                        id,
+                        Instant::now().duration_since(start),
+                    ))
+                    .await
+                    .unwrap_or(());
+            }
+            PlanStepKind::Delete(f) => {
+                if let Some(resource) = state.get(&id) {
+                    f(id.clone(), resource.state)
+                        .await
+                        .map_err(|e| ResourceError(resource.id, e))?;
+                }
+                state.remove(&id);
+                events_tx
+                    .send(PlanExecutionEvent::Deleted(
+                        id,
+                        Instant::now().duration_since(start),
+                    ))
+                    .await
+                    .unwrap_or(());
+            }
+        }
+
+        stop_emitting_events.await;
+
+        Ok(())
+    }
+
     pub async fn execute_once(
-        self,
+        mut self,
         state: &'a State,
         events_tx: Sender<PlanExecutionEvent>,
     ) -> Result<(), Vec<ResourceError>> {
-        let fo =
-            FuturesUnordered::<Pin<Box<dyn Future<Output = Result<(), ResourceError>>>>>::new();
-
         let before_all = Instant::now();
-        for (id, _, kind) in self.steps {
-            let start = Instant::now();
-            let (tx, rx) = futures::channel::oneshot::channel::<()>();
-            fo.push({
-                let id = id.clone();
-                let mut event = match &kind {
-                    PlanStepKind::Create(_, _) => {
-                        PlanExecutionEvent::Creating(id, Duration::ZERO)
-                    }
-                    PlanStepKind::Update(_, _, _) => {
-                        PlanExecutionEvent::Updating(id, Duration::ZERO)
-                    }
-                    PlanStepKind::Delete(_) => PlanExecutionEvent::Deleting(id, Duration::ZERO),
-                };
-                let events_tx = events_tx.clone();
-                Box::pin(async move {
-                    let mut done = Box::pin(rx);
-                    loop {
-                        match futures::future::select(
-                            Box::pin(async {
-                                async_std::task::sleep(Duration::from_secs(2)).await;
-                            }),
-                            done,
-                        )
-                        .await
-                        {
-                            Either::Left((_, l)) => {
-                                done = l;
-                            }
-                            Either::Right(_) => break,
-                        }
+        let pending_steps = RwLock::new(BTreeMap::new());
+        let fo = FuturesUnordered::new();
 
-                        match &mut event {
-                            PlanExecutionEvent::Creating(_, d)
-                            | PlanExecutionEvent::Updating(_, d)
-                            | PlanExecutionEvent::Deleting(_, d) => {
-                                *d = Instant::now().duration_since(start)
-                            }
-                            _ => {}
-                        }
-                        events_tx.send(event.clone()).await.unwrap_or(());
+        let mut pending_steps_guard = pending_steps.write().await;
+
+        let mut switched_dependency_relationships = vec![];
+        for step in &self.steps {
+            if let PlanStepKind::Delete(_) = step.2 {
+                // This step's dependencies should be changed
+                // to contain the ids of steps that currently
+                // depend on this step's resource id.
+
+                for dependent in &self.steps {
+                    if dependent.1.contains(&step.0) {
+                        switched_dependency_relationships
+                            .push((step.0.clone(), dependent.0.clone()));
                     }
-                    Ok(())
-                })
-            });
-            let events_tx = events_tx.clone();
-            match kind {
-                PlanStepKind::Create(_, f) => fo.push(Box::pin(async move {
-                    state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
-                    drop(tx);
-                    events_tx
-                        .send(PlanExecutionEvent::Created(
-                            id,
-                            Instant::now().duration_since(start),
-                        ))
-                        .await
-                        .unwrap_or(());
-                    Ok(())
-                })),
-                PlanStepKind::Update(_, _, f) => fo.push(Box::pin(async move {
-                    state.insert(f().await.map_err(|e| ResourceError(id.clone(), e))?);
-                    drop(tx);
-                    events_tx
-                        .send(PlanExecutionEvent::Updated(
-                            id,
-                            Instant::now().duration_since(start),
-                        ))
-                        .await
-                        .unwrap_or(());
-                    Ok(())
-                })),
-                PlanStepKind::Delete(f) => fo.push(Box::pin(async move {
-                    if let Some(resource) = state.get(&id) {
-                        f(id.clone(), resource.state)
-                            .await
-                            .map_err(|e| ResourceError(resource.id, e))?;
-                    }
-                    state.remove(&id);
-                    drop(tx);
-                    events_tx
-                        .send(PlanExecutionEvent::Deleted(
-                            id,
-                            Instant::now().duration_since(start),
-                        ))
-                        .await
-                        .unwrap_or(());
-                    Ok(())
-                })),
+                }
             }
         }
+
+        for (id, deps, kind) in &mut self.steps {
+            if let PlanStepKind::Delete(_) = kind {
+                *deps = switched_dependency_relationships
+                    .iter()
+                    .filter(|(i, _)| i == id)
+                    .map(|(_, d)| d.clone())
+                    .collect();
+            }
+        }
+
+        for step in self.steps {
+            let (tx, rx) = async_std::channel::bounded::<()>(1);
+            pending_steps_guard.insert(step.0.clone(), rx);
+
+            let events_tx = events_tx.clone();
+            let pending_steps = &pending_steps;
+            fo.push(async move {
+                let r = Self::execute_step(state, events_tx, step, pending_steps).await;
+                drop(tx);
+                r
+            });
+        }
+
+        drop(pending_steps_guard);
+
         let results = fo.collect::<Vec<Result<(), ResourceError>>>().await;
+
         events_tx
             .send(PlanExecutionEvent::Done(
                 Instant::now().duration_since(before_all),
