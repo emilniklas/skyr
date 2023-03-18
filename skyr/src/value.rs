@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::execute::RuntimeValue;
+use crate::execute::{DependentValue, RuntimeValue};
 use crate::{Diff, DisplayAsDebug, SerializationError, ValueDeserializer, ValueSerializer};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -44,27 +44,25 @@ impl fmt::Display for Value {
     }
 }
 
-impl<'a> TryFrom<RuntimeValue<'a>> for Value {
-    type Error = RuntimeValue<'a>;
-
-    fn try_from(value: RuntimeValue<'a>) -> Result<Self, Self::Error> {
+impl<'a> From<RuntimeValue<'a>> for DependentValue<Value> {
+    fn from(value: RuntimeValue<'a>) -> Self {
         match value {
-            RuntimeValue::Primitive(p) => Ok(Value::Primitive(p)),
-            RuntimeValue::Collection(Collection::List(l)) => {
-                Ok(Value::Collection(Collection::List(
-                    l.into_iter()
-                        .map(RuntimeValue::try_into)
-                        .collect::<Result<_, Self::Error>>()?,
-                )))
+            RuntimeValue::Primitive(p) => Value::Primitive(p).into(),
+            RuntimeValue::Collection(c) => {
+                Into::<DependentValue<Collection<RuntimeValue<'a>>>>::into(c)
+                    .flat_map(|rv_collection| {
+                        let collection_dv: Collection<DependentValue<Value>> =
+                            rv_collection.map(RuntimeValue::into);
+                        let dv_collection: DependentValue<Collection<Value>> = collection_dv.into();
+                        dv_collection
+                    })
+                    .map(Value::Collection)
             }
-            RuntimeValue::Collection(Collection::Record(r)) => {
-                Ok(Value::Collection(Collection::Record(
-                    r.into_iter()
-                        .map(|(k, v)| Ok((k, v.try_into()?)))
-                        .collect::<Result<_, Self::Error>>()?,
-                )))
-            }
-            rv => Err(rv),
+
+            v => panic!(
+                "runtime value {:?} doesn't support being cast to static value",
+                v
+            ),
         }
     }
 }

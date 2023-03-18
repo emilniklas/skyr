@@ -37,7 +37,7 @@ pub enum PlanStepKind<'a> {
 
 #[derive(Default)]
 pub struct Plan<'a> {
-    steps: Vec<(ResourceId, PlanStepKind<'a>)>,
+    steps: Vec<(ResourceId, Vec<ResourceId>, PlanStepKind<'a>)>,
     debug_messages: Vec<(Span, RuntimeValue<'a>)>,
     phase_index: usize,
 }
@@ -56,7 +56,7 @@ impl<'a> fmt::Debug for Plan<'a> {
             }
         }
 
-        for (i, (id, kind)) in self.steps.iter().enumerate() {
+        for (i, (id, _, kind)) in self.steps.iter().enumerate() {
             if i > 0 {
                 write!(f, "\n")?;
             }
@@ -88,7 +88,7 @@ impl<'a> Plan<'a> {
     pub fn to_be_created(&self) -> Vec<(&ResourceId, &Value)> {
         self.steps
             .iter()
-            .filter_map(|(id, step)| match step {
+            .filter_map(|(id, _, step)| match step {
                 PlanStepKind::Create(args, _) => Some((id, args)),
                 _ => None,
             })
@@ -98,7 +98,7 @@ impl<'a> Plan<'a> {
     pub fn to_be_updated(&self) -> Vec<(&ResourceId, Diff)> {
         self.steps
             .iter()
-            .filter_map(|(id, step)| match step {
+            .filter_map(|(id, _, step)| match step {
                 PlanStepKind::Update(old, new, _) => Some((id, old.diff(new))),
                 _ => None,
             })
@@ -108,7 +108,7 @@ impl<'a> Plan<'a> {
     pub fn to_be_deleted(&self) -> Vec<&ResourceId> {
         self.steps
             .iter()
-            .filter_map(|(id, step)| match step {
+            .filter_map(|(id, _, step)| match step {
                 PlanStepKind::Delete(_) => Some(id),
                 _ => None,
             })
@@ -119,10 +119,11 @@ impl<'a> Plan<'a> {
         &mut self,
         id: ResourceId,
         args: Value,
+        dependencies: Vec<ResourceId>,
         f: impl 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>,
     ) {
         self.steps
-            .push((id, PlanStepKind::Create(args, Box::new(f))));
+            .push((id, dependencies, PlanStepKind::Create(args, Box::new(f))));
     }
 
     pub fn register_update(
@@ -130,18 +131,24 @@ impl<'a> Plan<'a> {
         id: ResourceId,
         old_args: Value,
         args: Value,
+        dependencies: Vec<ResourceId>,
         f: impl 'a + FnOnce() -> Pin<Box<dyn 'a + Future<Output = io::Result<ResourceState>>>>,
     ) {
-        self.steps
-            .push((id, PlanStepKind::Update(old_args, args, Box::new(f))));
+        self.steps.push((
+            id,
+            dependencies,
+            PlanStepKind::Update(old_args, args, Box::new(f)),
+        ));
     }
 
     pub fn register_delete(
         &mut self,
         id: ResourceId,
+        dependencies: Vec<ResourceId>,
         f: impl 'a + FnOnce(ResourceId, Value) -> Pin<Box<dyn 'a + Future<Output = io::Result<()>>>>,
     ) {
-        self.steps.push((id, PlanStepKind::Delete(Box::new(f))));
+        self.steps
+            .push((id, dependencies, PlanStepKind::Delete(Box::new(f))));
     }
 
     pub fn register_debug(&mut self, span: Span, value: RuntimeValue<'a>) {
@@ -155,14 +162,17 @@ impl<'a> Plan<'a> {
     ) -> Result<(), Vec<ResourceError>> {
         let fo =
             FuturesUnordered::<Pin<Box<dyn Future<Output = Result<(), ResourceError>>>>>::new();
+
         let before_all = Instant::now();
-        for (id, kind) in self.steps {
+        for (id, _, kind) in self.steps {
             let start = Instant::now();
             let (tx, rx) = futures::channel::oneshot::channel::<()>();
             fo.push({
                 let id = id.clone();
                 let mut event = match &kind {
-                    PlanStepKind::Create(_, _) => PlanExecutionEvent::Creating(id, Duration::ZERO),
+                    PlanStepKind::Create(_, _) => {
+                        PlanExecutionEvent::Creating(id, Duration::ZERO)
+                    }
                     PlanStepKind::Update(_, _, _) => {
                         PlanExecutionEvent::Updating(id, Duration::ZERO)
                     }

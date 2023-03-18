@@ -6,16 +6,11 @@ id = Random.Identifier {
   byteLength: 4
 }
 
-Random.Identifier {
-  name: "test4"
-  byteLength: 6
-}
-
 dir = FileSystem.Directory {
   path: "dirsa-" + id.hex
 }
 
 FileSystem.File {
-  path: "file3.txt"
+  path: dir.path + "/file3.txt"
   content: "Hello, Worldzz!!\n"
 }

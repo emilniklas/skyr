@@ -320,8 +320,32 @@ impl<R: Read, W: Write> GuiState<R, W> {
     }
 
     pub fn print_resource_state(&mut self, state: &ResourceState) -> io::Result<()> {
-        write!(self.w, "{} ", format!("{:?}", state.id.type_).bold(),)?;
+        write!(self.w, "{} ", format!("{:?}", state.id.type_).bold())?;
+
+        if !state.dependencies.is_empty() {
+            self.indentation += 1;
+
+            self.print_newline()?;
+            write!(self.w, "{}", "depends on".blue().bold())?;
+            self.indentation += 1;
+            for dep in state.dependencies.iter() {
+                self.print_newline()?;
+                write!(
+                    self.w,
+                    "{} {}",
+                    format!("{:?}", dep.type_).bold(),
+                    format!("{:?}", dep.id).bright_blue()
+                )?;
+            }
+            self.indentation -= 1;
+            self.print_newline()?;
+        }
+
         self.print_value(&state.state)?;
+
+        if !state.dependencies.is_empty() {
+            self.indentation -= 1;
+        }
         self.print_newline()
     }
 

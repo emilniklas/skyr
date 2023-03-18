@@ -91,6 +91,7 @@ impl State {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ResourceState {
     pub id: ResourceId,
+    pub dependencies: Vec<ResourceId>,
     pub arg: Value,
     pub state: Value,
 }

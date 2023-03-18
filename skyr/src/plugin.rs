@@ -17,16 +17,6 @@ macro_rules! export_plugin {
     };
 }
 
-#[macro_export]
-macro_rules! known {
-    ($value:expr) => {{
-        match $value {
-            p @ skyr::execute::RuntimeValue::Pending(_) => return p.clone(),
-            v => v,
-        }
-    }};
-}
-
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync {
     fn import_name(&self) -> &str;

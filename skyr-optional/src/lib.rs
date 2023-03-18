@@ -39,10 +39,12 @@ impl Plugin for Optional {
             (
                 "otherwise",
                 RuntimeValue::function_sync(|_, mut args| {
-                    if let RuntimeValue::Primitive(Primitive::Nil) = known!(&args[0]) {
-                        args.remove(1)
+                    let optional = known!(args.remove(0));
+                    let otherwise = args.remove(0);
+                    if let RuntimeValue::Primitive(Primitive::Nil) = optional {
+                        otherwise
                     } else {
-                        args.remove(0)
+                        optional.into()
                     }
                 }),
             ),
@@ -50,12 +52,14 @@ impl Plugin for Optional {
                 "map",
                 RuntimeValue::function_async(|e, mut args| {
                     Box::pin(async move {
-                        if let RuntimeValue::Primitive(Primitive::Nil) = known!(&args[0]) {
-                            args.remove(0)
+                        let optional = known!(args.remove(0));
+                        let f = args.remove(0);
+
+                        if let RuntimeValue::Primitive(Primitive::Nil) = optional {
+                            optional.into()
                         } else {
-                            let f = known!(args.remove(1));
-                            let v = args.remove(0);
-                            f.as_func()(e, vec![v]).await
+                            let f = known!(f);
+                            f.as_func()(e, vec![optional.into()]).await
                         }
                     })
                 }),

@@ -43,36 +43,42 @@ impl Plugin for List {
         RuntimeValue::Collection(Collection::record([
             (
                 "first",
-                RuntimeValue::function_sync(|_, args| {
-                    let list = known!(&args[0]).as_collection().as_vec();
+                RuntimeValue::function_sync(|_, mut args| {
+                    let list = known!(args.remove(0));
+                    let list = list.as_collection().as_vec();
                     list.first()
                         .cloned()
-                        .unwrap_or(RuntimeValue::Primitive(Primitive::Nil))
+                        .unwrap_or(RuntimeValue::Primitive(Primitive::Nil).into())
                 }),
             ),
             (
                 "range",
-                RuntimeValue::function_sync(|_, args| {
-                    let length = known!(&args[0]).as_primitive().as_usize();
+                RuntimeValue::function_sync(|_, mut args| {
+                    let list = known!(args.remove(0));
+                    let length = list.as_primitive().as_usize();
                     RuntimeValue::Collection(Collection::List(
                         (0..length)
-                            .map(|i| RuntimeValue::Primitive(i.into()))
+                            .map(|i| RuntimeValue::Primitive(i.into()).into())
                             .collect(),
                     ))
+                    .into()
                 }),
             ),
             (
                 "map",
-                RuntimeValue::function_async(|e, args| {
+                RuntimeValue::function_async(|e, mut args| {
                     Box::pin(async move {
-                        let list = known!(&args[0]).as_collection().as_vec();
-                        let f = known!(&args[1]).as_func();
+                        let list = known!(args.remove(0));
+                        let f = known!(args.remove(0));
+
+                        let list = list.as_collection().as_vec();
+                        let f = f.as_func();
 
                         let mut fo = FuturesOrdered::new();
                         for element in list {
                             fo.push_back(f(e, vec![element.clone()]));
                         }
-                        RuntimeValue::Collection(Collection::List(fo.collect().await))
+                        RuntimeValue::Collection(Collection::List(fo.collect().await)).into()
                     })
                 }),
             ),
