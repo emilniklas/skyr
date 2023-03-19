@@ -173,8 +173,13 @@ impl<'a> TypeEnvironment<'a> {
             Type::Void => Type::Void,
             Type::String => Type::String,
             Type::Integer => Type::Integer,
+            Type::Float => Type::Float,
             Type::Boolean => Type::Boolean,
             Type::List(e) => Type::List(Box::new(self.do_resolve(*e, seen_ids))),
+            Type::Map(k, v) => Type::Map(
+                Box::new(self.do_resolve(*k, seen_ids.clone())),
+                Box::new(self.do_resolve(*v, seen_ids)),
+            ),
             Type::Open(id) if seen_ids.contains(&id) => Type::Open(id),
             Type::Open(id) => self
                 .bindings
@@ -630,12 +635,14 @@ pub enum Type {
     Void,
     String,
     Integer,
+    Float,
     Boolean,
     Open(TypeId),
     Record(Vec<(String, Type)>),
     Named(String, Box<Type>),
     Function(Vec<Type>, Box<Type>),
     List(Box<Type>),
+    Map(Box<Type>, Box<Type>),
     Optional(Box<Type>),
 }
 
@@ -698,7 +705,13 @@ impl<'a> fmt::Debug for PrettyTypeDebug<'a> {
             Type::Void => write!(f, "Void"),
             Type::String => write!(f, "String"),
             Type::Integer => write!(f, "Integer"),
+            Type::Float => write!(f, "Float"),
             Type::Boolean => write!(f, "Boolean"),
+            Type::Map(key, value) => {
+                let mut s = f.debug_map();
+                s.entry(&self.inner(&key), &self.inner(&value));
+                s.finish()
+            }
             Type::List(element) => {
                 let mut s = f.debug_list();
                 s.entry(&self.inner(&element));

@@ -7,4 +7,5 @@ members = [
   "skyr-list",
   "skyr-optional",
   "skyr-random",
+  "skyr-terraform",
 ]

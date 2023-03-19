@@ -30,7 +30,10 @@ impl Plugin for FileSystem {
 
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
         RuntimeValue::record([
-            ("File", RuntimeValue::resource(ctx.clone(), file::FileResource)),
+            (
+                "File",
+                RuntimeValue::resource(ctx.clone(), file::FileResource),
+            ),
             (
                 "Directory",
                 RuntimeValue::resource(ctx, directory::DirectoryResource),

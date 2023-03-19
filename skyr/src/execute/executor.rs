@@ -101,20 +101,25 @@ impl<'a> Executor<'a> {
             let used = self.used_resources.into_inner();
 
             for resource in state.all_not_in(&used) {
-                plan.register_delete(resource.id.clone(), resource.dependencies.clone(), move |_, _| {
-                    Box::pin(async move {
-                        for plugin in self.plugins.iter() {
-                            if let Some(()) = plugin.delete_matching_resource(&resource).await? {
-                                return Ok(());
+                plan.register_delete(
+                    resource.id.clone(),
+                    resource.dependencies.clone(),
+                    move |_, _| {
+                        Box::pin(async move {
+                            for plugin in self.plugins.iter() {
+                                if let Some(()) = plugin.delete_matching_resource(&resource).await?
+                                {
+                                    return Ok(());
+                                }
                             }
-                        }
 
-                        Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("no plugin took ownership of resource {:?}", resource.id),
-                        ))
-                    })
-                });
+                            Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("no plugin took ownership of resource {:?}", resource.id),
+                            ))
+                        })
+                    },
+                );
             }
         }
 
@@ -770,12 +775,7 @@ impl<'a> RuntimeValue<'a> {
                                     Ok(Some(s)) => s,
                                     Ok(None) => {
                                         executor
-                                            .register_create(
-                                                r,
-                                                id.clone(),
-                                                arg_value,
-                                                dependencies,
-                                            )
+                                            .register_create(r, id.clone(), arg_value, dependencies)
                                             .await;
                                         return DependentValue::pending(vec![id]);
                                     }
@@ -815,8 +815,7 @@ impl<'a> RuntimeValue<'a> {
                                     return DependentValue::pending(vec![id]);
                                 }
 
-                                DependentValue::new(resource.state.into())
-                                    .with_dependency(id)
+                                DependentValue::new(resource.state.into()).with_dependency(id)
                             }
                         }
                     }),

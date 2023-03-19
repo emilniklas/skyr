@@ -88,20 +88,24 @@ async fn teardown(
 
     for resource in state.all_not_in(&Default::default()) {
         let plugins = &plugins;
-        plan.register_delete(resource.id.clone(), resource.dependencies.clone(), move |_, _| {
-            Box::pin(async move {
-                for plugin in plugins.iter() {
-                    if let Some(()) = plugin.delete_matching_resource(&resource).await? {
-                        return Ok(());
+        plan.register_delete(
+            resource.id.clone(),
+            resource.dependencies.clone(),
+            move |_, _| {
+                Box::pin(async move {
+                    for plugin in plugins.iter() {
+                        if let Some(()) = plugin.delete_matching_resource(&resource).await? {
+                            return Ok(());
+                        }
                     }
-                }
 
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("no plugin took ownership of resource {:?}", resource.id),
-                ))
-            })
-        });
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("no plugin took ownership of resource {:?}", resource.id),
+                    ))
+                })
+            },
+        );
     }
 
     gui.print_plan(&plan).await?;

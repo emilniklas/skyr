@@ -39,7 +39,7 @@ impl Resource for DirectoryResource {
         _arg: &mut Self::Arguments,
     ) -> io::Result<Option<Self::State>> {
         match async_std::fs::read_dir(&prev.path).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
