@@ -175,7 +175,7 @@ async fn save_state(state: &State) -> io::Result<()> {
         }
     } else {
         state.save(
-            std::fs::OpenOptions::new()
+            &mut std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .open(STATEFILE)?,

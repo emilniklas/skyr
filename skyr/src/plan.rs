@@ -158,6 +158,10 @@ impl<'a> Plan<'a> {
         self.debug_messages.push((span, value));
     }
 
+    pub fn debug_messages(&self) -> impl Iterator<Item = (&Span, &RuntimeValue<'a>)> {
+        self.debug_messages.iter().map(|(s, v)| (s, v))
+    }
+
     fn emit_events(
         start: Instant,
         events_tx: Sender<PlanExecutionEvent>,

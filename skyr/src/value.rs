@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::execute::{DependentValue, RuntimeValue};
 use crate::{Diff, DisplayAsDebug, SerializationError, ValueDeserializer, ValueSerializer};
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
     Primitive(Primitive),
     Collection(Collection<Value>),
@@ -23,6 +23,36 @@ impl Value {
 
     pub fn deserialize<'a, T: Deserialize<'a>>(&'a self) -> Result<T, SerializationError> {
         T::deserialize(ValueDeserializer::new(self))
+    }
+
+    pub fn as_collection_mut(&mut self) -> &mut Collection<Value> {
+        if let Self::Collection(c) = self {
+            c
+        } else {
+            panic!("{:?} is not a collection", self)
+        }
+    }
+
+    pub fn as_collection(&self) -> &Collection<Value> {
+        if let Self::Collection(c) = self {
+            &c
+        } else {
+            panic!("{:?} is not a collection", self)
+        }
+    }
+
+    pub fn as_primitive(&self) -> &Primitive {
+        if let Self::Primitive(p) = self {
+            &p
+        } else {
+            panic!("{:?} is not a primitive", self)
+        }
+    }
+}
+
+impl<T: Into<Primitive>> From<T> for Value {
+    fn from(value: T) -> Self {
+        Self::Primitive(value.into())
     }
 }
 
@@ -67,7 +97,7 @@ impl<'a> From<RuntimeValue<'a>> for DependentValue<Value> {
     }
 }
 
-#[derive(Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, PartialOrd)]
 pub enum Primitive {
     Nil,
     String(Cow<'static, str>),
@@ -76,13 +106,21 @@ pub enum Primitive {
     Boolean(bool),
 }
 
+impl Eq for Primitive {}
+
+impl Ord for Primitive {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
 impl Primitive {
     pub fn static_str(s: &'static str) -> Self {
         Self::String(Cow::Borrowed(s))
     }
 
-    pub fn string(s: String) -> Self {
-        Self::String(Cow::Owned(s))
+    pub fn string(s: impl Into<String>) -> Self {
+        Self::String(Cow::Owned(s.into()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -415,16 +453,25 @@ impl fmt::Display for Primitive {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Collection<T = Primitive> {
     List(Vec<T>),
     Record(Vec<(Cow<'static, str>, T)>),
     Tuple(Vec<T>),
+    Dict(Vec<(T, T)>),
 }
 
 impl<T> Collection<T> {
     pub fn list(i: impl IntoIterator<Item = impl Into<T>>) -> Self {
         Self::List(i.into_iter().map(|i| i.into()).collect())
+    }
+
+    pub fn tuple(i: impl IntoIterator<Item = impl Into<T>>) -> Self {
+        Self::Tuple(i.into_iter().map(|i| i.into()).collect())
+    }
+
+    pub fn dict(i: impl IntoIterator<Item = (impl Into<T>, impl Into<T>)>) -> Self {
+        Self::Dict(i.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
     }
 
     pub fn static_record(i: impl IntoIterator<Item = (&'static str, impl Into<T>)>) -> Self {
@@ -453,21 +500,82 @@ impl<T> Collection<T> {
             Collection::Record(r) => {
                 Collection::Record(r.into_iter().map(|(k, v)| (k, f(v))).collect())
             }
+            Collection::Dict(m) => {
+                Collection::Dict(m.into_iter().map(|(k, v)| (f(k), f(v))).collect())
+            }
+        }
+    }
+}
+
+impl Collection<Value> {
+    pub fn access_member(&self, n: &str) -> Option<&Value> {
+        match self {
+            Self::Record(r) => r.iter().find_map(|(k, v)| (k == n).then_some(v)),
+            Self::Dict(d) => d
+                .iter()
+                .find_map(|(k, v)| (k.as_primitive().as_str() == n).then_some(v)),
+            _ => None,
+        }
+    }
+
+    pub fn set_member(&mut self, k: impl Into<Cow<'static, str>>, v: impl Into<Value>) {
+        let k = k.into();
+        match self {
+            Self::Record(r) => {
+                if let Some(entry) = r.iter_mut().find_map(|(n, v)| (n == &k).then_some(v)) {
+                    *entry = v.into();
+                } else {
+                    r.push((k, v.into()));
+                }
+            }
+            Self::Dict(d) => {
+                if let Some(entry) = d
+                    .iter_mut()
+                    .find_map(|(n, v)| (n.as_primitive().as_str() == &k).then_some(v))
+                {
+                    *entry = v.into();
+                } else {
+                    d.push((Value::Primitive(Primitive::String(k)), v.into()));
+                }
+            }
+            _ => panic!("{:?} is not a record", self),
+        }
+    }
+}
+
+impl<'a> Collection<DependentValue<RuntimeValue<'a>>> {
+    pub fn access_member(&self, n: &str) -> Cow<DependentValue<RuntimeValue<'a>>> {
+        match self {
+            Self::Record(r) => r
+                .iter()
+                .find_map(|(k, v)| (k == n).then_some(v))
+                .map(Cow::Borrowed)
+                .expect("no such field"),
+            Self::Dict(d) => {
+                let mut deps = vec![];
+                for (k, v) in d {
+                    match k.clone().into_result() {
+                        Ok(k) => {
+                            if let RuntimeValue::Primitive(Primitive::String(k)) = k {
+                                if k == n {
+                                    return Cow::Borrowed(v);
+                                }
+                            }
+                        }
+                        Err(p) => deps.extend(p.dependencies),
+                    }
+                }
+                if deps.is_empty() {
+                    panic!("no such field");
+                }
+                Cow::Owned(DependentValue::pending(deps))
+            }
+            _ => panic!("{:?} is not a record", self),
         }
     }
 }
 
 impl<T: fmt::Debug> Collection<T> {
-    pub fn access_member(&self, k: &str) -> &T {
-        if let Self::Record(r) = self {
-            r.iter()
-                .find_map(|(n, v)| (n == k).then_some(v))
-                .expect("no such field")
-        } else {
-            panic!("{:?} is not a record", self)
-        }
-    }
-
     pub fn as_vec(&self) -> &Vec<T> {
         if let Self::List(l) = self {
             l
@@ -516,6 +624,13 @@ impl<T: fmt::Debug> fmt::Debug for Collection<T> {
                 let mut f = f.debug_map();
                 for (k, v) in r {
                     f.entry(&DisplayAsDebug(k), v);
+                }
+                f.finish()
+            }
+            Self::Dict(r) => {
+                let mut f = f.debug_map();
+                for (k, v) in r {
+                    f.entry(k, v);
                 }
                 f.finish()
             }

@@ -43,22 +43,15 @@ impl State {
     }
 
     pub fn open(reader: impl io::Read) -> io::Result<State> {
-        bincode::deserialize_from(reader).map_err(Self::bincode_to_io_error)
+        rmp_serde::from_read(reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
-    pub fn save(&self, writer: impl io::Write) -> io::Result<()> {
-        bincode::serialize_into(writer, &self).map_err(Self::bincode_to_io_error)
+    pub fn save(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        rmp_serde::encode::write(writer, &self).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     pub fn is_empty(&self) -> bool {
         self.resources.read().unwrap().is_empty()
-    }
-
-    fn bincode_to_io_error(e: bincode::Error) -> io::Error {
-        match *e {
-            bincode::ErrorKind::Io(e) => e,
-            e => io::Error::new(io::ErrorKind::Other, e),
-        }
     }
 
     pub fn get(&self, id: &ResourceId) -> Option<ResourceState> {

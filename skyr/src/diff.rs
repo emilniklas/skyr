@@ -12,6 +12,7 @@ pub enum Diff<'a> {
     Record(Vec<(&'a str, Diff<'a>)>),
     List(Vec<Diff<'a>>),
     Tuple(Vec<Diff<'a>>),
+    Dict(Vec<(&'a Value, Diff<'a>)>),
 }
 
 impl<'a> Diff<'a> {
@@ -43,6 +44,33 @@ impl<'a> Diff<'a> {
                 }
 
                 Diff::Record(diff)
+            }
+            (
+                Value::Collection(Collection::Dict(old)),
+                Value::Collection(Collection::Dict(new)),
+            ) => {
+                let mut diff = vec![];
+                let mut seen = BTreeSet::new();
+
+                'olds: for (old_key, old_value) in old {
+                    for (new_key, new_value) in new {
+                        if old_key == new_key {
+                            diff.push((old_key, Diff::calculate(old_value, new_value)));
+                            seen.insert(old_key);
+                            continue 'olds;
+                        }
+                    }
+
+                    diff.push((old_key, Diff::Removed(old_value)));
+                }
+
+                for (new_key, new_value) in new {
+                    if !seen.contains(new_key) {
+                        diff.push((new_key, Diff::Added(new_value)));
+                    }
+                }
+
+                Diff::Dict(diff)
             }
             (
                 Value::Collection(Collection::List(old)),
@@ -103,6 +131,13 @@ impl<'a> fmt::Debug for Diff<'a> {
                 let mut m = f.debug_map();
                 for (n, d) in r {
                     m.entry(&DisplayAsDebug(n), d);
+                }
+                m.finish()
+            }
+            Diff::Dict(d) => {
+                let mut m = f.debug_map();
+                for (k, v) in d {
+                    m.entry(k, v);
                 }
                 m.finish()
             }

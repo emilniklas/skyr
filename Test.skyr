@@ -1,0 +1,9 @@
+import Google
+
+google = Google {
+}
+
+google.ComputeNetwork {
+  skyrKey: "my-network"
+  name: "my-network"
+}

@@ -678,6 +678,14 @@ impl Type {
             panic!("{:?} is not a function", self)
         }
     }
+
+    pub fn is_optional(&self) -> bool {
+        matches!(self, Type::Optional(_))
+    }
+
+    pub fn into_named(self, name: impl Into<String>) -> Self {
+        Self::Named(name.into(), Box::new(self))
+    }
 }
 
 struct PrettyTypeDebug<'a> {

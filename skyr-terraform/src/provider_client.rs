@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -12,7 +14,7 @@ use tower::service_fn;
 
 use crate::{tfplugin5, tfplugin6};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProviderClient {
     V5(tfplugin5::provider_client::ProviderClient<Channel>),
     V6(tfplugin6::provider_client::ProviderClient<Channel>),
@@ -28,7 +30,7 @@ impl ProviderClient {
             .env("PLUGIN_PROTOCOL_VERSIONS", "6,5")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .spawn()?;
 
         let mut stdout = BufReader::new(c.stdout.take().unwrap());
@@ -83,7 +85,7 @@ impl ProviderClient {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProviderSchema {
     V5(tfplugin5::get_provider_schema::Response),
     V6(tfplugin6::get_provider_schema::Response),
@@ -92,8 +94,8 @@ pub enum ProviderSchema {
 impl ProviderSchema {
     pub fn provider_schema(&self) -> Option<Schema> {
         match self {
-            Self::V5(s) => s.provider.as_ref().map(Schema::V5),
-            Self::V6(s) => s.provider.as_ref().map(Schema::V6),
+            Self::V5(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V5),
+            Self::V6(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V6),
         }
     }
 
@@ -102,134 +104,277 @@ impl ProviderSchema {
             Self::V5(s) => s
                 .resource_schemas
                 .iter()
-                .map(|(name, schema)| (name.as_str(), Schema::V5(schema)))
+                .map(|(name, schema)| (name.as_str(), Schema::V5(Cow::Borrowed(schema))))
                 .collect(),
             Self::V6(s) => s
                 .resource_schemas
                 .iter()
-                .map(|(name, schema)| (name.as_str(), Schema::V6(schema)))
+                .map(|(name, schema)| (name.as_str(), Schema::V6(Cow::Borrowed(schema))))
                 .collect(),
         }
     }
 
-    pub fn as_type(&self) -> Type {
+    pub fn as_type(&self, with_name: &str) -> Type {
+        let prefix = format!("{}_", with_name);
+        let upper_name = with_name.to_class_case();
         let resources = Type::record(
             self.resource_schemas()
                 .into_iter()
-                .map(|(name, schema)| (name.to_class_case(), schema.as_type())),
+                .map(|(name, schema)| (name.replacen(&prefix, "", 1).to_class_case(), schema))
+                .map(|(name, schema)| {
+                    let mut arg_type = schema.as_arguments_type();
+                    if let Type::Record(fields) = &mut arg_type {
+                        fields.insert(0, ("skyrKey".into(), Type::String));
+                    }
+                    let result_type = schema.as_attributes_type();
+                    (
+                        name.clone(),
+                        Type::function(
+                            [arg_type],
+                            result_type.into_named(format!("{}.{}", upper_name, name)),
+                        ),
+                    )
+                }),
         );
 
-        if let Some(arg) = self.provider_schema().as_ref().map(Schema::as_type) {
-            Type::function([arg], resources)
+        if let Some(arg) = self.provider_schema().as_ref().map(Schema::as_arguments_type) {
+            Type::function([arg], resources).into_named(upper_name)
         } else {
-            resources
+            resources.into_named(upper_name)
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Schema<'a> {
-    V5(&'a tfplugin5::Schema),
-    V6(&'a tfplugin6::Schema),
+    V5(Cow<'a, tfplugin5::Schema>),
+    V6(Cow<'a, tfplugin6::Schema>),
 }
 
 impl<'a> Schema<'a> {
-    pub fn block(&self) -> Option<Block<'a>> {
+    pub fn as_static(self) -> Schema<'static> {
         match self {
-            Self::V5(s) => s.block.as_ref().map(Block::V5),
-            Self::V6(s) => s.block.as_ref().map(Block::V6),
+            Self::V5(s) => Schema::V5(Cow::Owned(s.as_ref().clone())),
+            Self::V6(s) => Schema::V6(Cow::Owned(s.as_ref().clone())),
         }
     }
 
-    pub fn as_type(&self) -> Type {
-        self.block().map(|b| b.as_type()).unwrap_or(Type::Void)
+    pub fn block(&self) -> Option<Block> {
+        match self {
+            Self::V5(s) => s.block.as_ref().map(Cow::Borrowed).map(Block::V5),
+            Self::V6(s) => s.block.as_ref().map(Cow::Borrowed).map(Block::V6),
+        }
+    }
+
+    pub fn as_arguments_type(&self) -> Type {
+        self.block()
+            .map(|b| b.as_arguments_type())
+            .unwrap_or(Type::Void)
+    }
+
+    pub fn as_attributes_type(&self) -> Type {
+        self.block()
+            .map(|b| b.as_attributes_type())
+            .unwrap_or(Type::Void)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Block<'a> {
-    V5(&'a tfplugin5::schema::Block),
-    V6(&'a tfplugin6::schema::Block),
+    V5(Cow<'a, tfplugin5::schema::Block>),
+    V6(Cow<'a, tfplugin6::schema::Block>),
 }
 
 impl<'a> Block<'a> {
-    pub fn attributes(&self) -> Vec<Attribute<'a>> {
+    pub fn as_static(self) -> Block<'static> {
         match self {
-            Self::V5(b) => b.attributes.iter().map(Attribute::V5).collect(),
-            Self::V6(b) => b.attributes.iter().map(Attribute::V6).collect(),
+            Self::V5(s) => Block::V5(Cow::Owned(s.as_ref().clone())),
+            Self::V6(s) => Block::V6(Cow::Owned(s.as_ref().clone())),
         }
     }
 
-    pub fn nested_blocks(&self) -> Vec<NestedBlock<'a>> {
+    pub fn attribute(&self, name: &str) -> Option<Attribute> {
+        self.attributes().into_iter().find(|a| a.name() == name)
+    }
+
+    pub fn attributes(&self) -> Vec<Attribute> {
         match self {
-            Self::V5(b) => b.block_types.iter().map(NestedBlock::V5).collect(),
-            Self::V6(b) => b.block_types.iter().map(NestedBlock::V6).collect(),
+            Self::V5(b) => b
+                .attributes
+                .iter()
+                .map(Cow::Borrowed)
+                .map(Attribute::V5)
+                .collect(),
+            Self::V6(b) => b
+                .attributes
+                .iter()
+                .map(Cow::Borrowed)
+                .map(Attribute::V6)
+                .collect(),
         }
     }
 
-    pub fn as_type(&self) -> Type {
-        Type::record(
-            self.attributes()
-                .into_iter()
-                .map(|attribute| (attribute.name().to_camel_case(), attribute.type_()))
-                .chain(
-                    self.nested_blocks()
-                        .into_iter()
-                        .map(|nb| (nb.type_name().to_camel_case().to_plural(), nb.as_type())),
-                ),
-        )
+    pub fn nested_blocks(&self) -> Vec<NestedBlock> {
+        match self {
+            Self::V5(b) => b
+                .block_types
+                .iter()
+                .map(Cow::Borrowed)
+                .map(NestedBlock::V5)
+                .collect(),
+            Self::V6(b) => b
+                .block_types
+                .iter()
+                .map(Cow::Borrowed)
+                .map(NestedBlock::V6)
+                .collect(),
+        }
+    }
+
+    pub fn as_arguments_type(&self) -> Type {
+        self.as_type(false)
+    }
+
+    pub fn as_attributes_type(&self) -> Type {
+        self.as_type(true)
+    }
+
+    fn as_type(&self, include_computed: bool) -> Type {
+        let mut fields = self
+            .attributes()
+            .into_iter()
+            .filter(|attribute| include_computed || !attribute.computed())
+            .map(|attribute| (attribute.name().to_camel_case(), attribute.type_()))
+            .chain(self.nested_blocks().into_iter().map(|nb| {
+                (
+                    nb.type_name().to_camel_case().to_plural(),
+                    nb.as_type(include_computed),
+                )
+            }))
+            .collect::<Vec<_>>();
+
+        fields.sort_by(
+            |(_, lt), (_, rt)| match (lt.is_optional(), rt.is_optional()) {
+                (true, true) | (false, false) => Ordering::Equal,
+                (false, true) => Ordering::Less,
+                (true, false) => Ordering::Greater,
+            },
+        );
+
+        Type::record(fields)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NestedBlock<'a> {
-    V5(&'a tfplugin5::schema::NestedBlock),
-    V6(&'a tfplugin6::schema::NestedBlock),
+    V5(Cow<'a, tfplugin5::schema::NestedBlock>),
+    V6(Cow<'a, tfplugin6::schema::NestedBlock>),
 }
 
 impl<'a> NestedBlock<'a> {
-    pub fn type_name(&self) -> &'a str {
+    pub fn as_static(self) -> NestedBlock<'static> {
+        match self {
+            Self::V5(s) => NestedBlock::V5(Cow::Owned(s.as_ref().clone())),
+            Self::V6(s) => NestedBlock::V6(Cow::Owned(s.as_ref().clone())),
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
         match self {
             Self::V5(b) => b.type_name.as_str(),
             Self::V6(b) => b.type_name.as_str(),
         }
     }
 
-    pub fn block(&self) -> Option<Block<'a>> {
+    pub fn block(&self) -> Option<Block> {
         match self {
-            Self::V5(b) => b.block.as_ref().map(Block::V5),
-            Self::V6(b) => b.block.as_ref().map(Block::V6),
+            Self::V5(b) => b.block.as_ref().map(Cow::Borrowed).map(Block::V5),
+            Self::V6(b) => b.block.as_ref().map(Cow::Borrowed).map(Block::V6),
         }
     }
 
-    pub fn as_type(&self) -> Type {
-        Type::list(
+    pub fn min_items(&self) -> i64 {
+        match self {
+            Self::V5(b) => b.min_items,
+            Self::V6(b) => b.min_items,
+        }
+    }
+
+    pub fn max_items(&self) -> i64 {
+        match self {
+            Self::V5(b) => b.max_items,
+            Self::V6(b) => b.max_items,
+        }
+    }
+
+    pub fn as_arguments_type(&self) -> Type {
+        self.as_type(false)
+    }
+
+    pub fn as_attributes_type(&self) -> Type {
+        self.as_type(true)
+    }
+
+    fn as_type(&self, include_computed: bool) -> Type {
+        let list = Type::list(
             self.block()
                 .as_ref()
-                .map(Block::as_type)
+                .map(|b| b.as_type(include_computed))
                 .unwrap_or(Type::Record(vec![])),
-        )
+        );
+
+        if self.min_items() == 0 {
+            Type::optional(list)
+        } else {
+            list
+        }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Attribute<'a> {
-    V5(&'a tfplugin5::schema::Attribute),
-    V6(&'a tfplugin6::schema::Attribute),
+    V5(Cow<'a, tfplugin5::schema::Attribute>),
+    V6(Cow<'a, tfplugin6::schema::Attribute>),
 }
 
 impl<'a> Attribute<'a> {
-    pub fn name(&self) -> &'a str {
+    pub fn as_static(self) -> Attribute<'static> {
+        match self {
+            Self::V5(s) => Attribute::V5(Cow::Owned(s.as_ref().clone())),
+            Self::V6(s) => Attribute::V6(Cow::Owned(s.as_ref().clone())),
+        }
+    }
+
+    pub fn name(&self) -> &str {
         match self {
             Self::V5(a) => a.name.as_str(),
             Self::V6(a) => a.name.as_str(),
         }
     }
 
-    pub fn type_(&self) -> Type {
+    pub fn computed(&self) -> bool {
         match self {
+            Self::V5(a) => a.computed,
+            Self::V6(a) => a.computed,
+        }
+    }
+
+    pub fn optional(&self) -> bool {
+        match self {
+            Self::V5(a) => a.optional || !a.required,
+            Self::V6(a) => a.optional || !a.required,
+        }
+    }
+
+    pub fn type_(&self) -> Type {
+        let t = match self {
             Self::V5(a) => type_from_bytes(a.r#type.as_slice()),
             Self::V6(a) => type_from_bytes(a.r#type.as_slice()),
+        };
+        if self.optional() {
+            Type::optional(t)
+        } else {
+            t
         }
     }
 }

@@ -238,6 +238,15 @@ impl<T> From<Collection<DependentValue<T>>> for DependentValue<Collection<T>> {
 
                 fields.map(Collection::Record)
             }
+            Collection::Dict(d) => {
+                let fields: DependentValue<Vec<(_, _)>> = d
+                    .into_iter()
+                    .map(|(dk, dv)| dk.flat_map(|k| dv.map(|v| (k, v))))
+                    .collect::<Vec<_>>()
+                    .into();
+
+                fields.map(Collection::Dict)
+            }
         }
     }
 }

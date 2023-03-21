@@ -1,7 +1,7 @@
 use std::io;
 
 use serde::{Deserialize, Serialize};
-use skyr::{export_plugin, Collection, ResourceState, TypeOf};
+use skyr::{deletable_resources, export_plugin, Collection, TypeOf};
 
 export_plugin!(Random);
 
@@ -13,7 +13,6 @@ use skyr::{Plugin, Resource};
 
 pub struct Random;
 
-#[async_trait::async_trait]
 impl Plugin for Random {
     fn import_name(&self) -> &str {
         "Random"
@@ -33,9 +32,7 @@ impl Plugin for Random {
         )]))
     }
 
-    async fn delete_matching_resource(&self, resource: &ResourceState) -> io::Result<Option<()>> {
-        IdentifierResource.try_match_delete(resource).await
-    }
+    deletable_resources!(IdentifierResource);
 }
 
 #[derive(Serialize, Deserialize, PartialEq, TypeOf)]

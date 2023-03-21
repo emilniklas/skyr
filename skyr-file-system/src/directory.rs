@@ -51,7 +51,7 @@ impl Resource for DirectoryResource {
         Ok(prev)
     }
 
-    async fn delete(&self, prev: Self::State) -> io::Result<()> {
+    async fn delete(prev: Self::State) -> io::Result<()> {
         async_std::fs::remove_dir(&prev.path).await
     }
 }

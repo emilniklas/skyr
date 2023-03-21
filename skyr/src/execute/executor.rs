@@ -12,7 +12,8 @@ use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
 use crate::{
-    compile::*, DisplayAsDebug, Plugin, Primitive, ResourceError, ResourceId, ResourceState,
+    compile::*, DisplayAsDebug, IdentifyResource, Plugin, Primitive, ResourceError, ResourceId,
+    ResourceState, TypeBasedResource, TypeOf,
 };
 use crate::{Collection, Plan, Value};
 use crate::{Resource, State};
@@ -348,6 +349,7 @@ impl<'a> Executor<'a> {
                     subject
                         .as_collection()
                         .access_member(ma.identifier.symbol.as_str())
+                        .as_ref()
                         .clone()
                 }),
             Expression::Construct(construct) => {
@@ -636,6 +638,22 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
                 }
                 l.finish()
             }
+            RuntimeValue::Collection(Collection::Dict(fields)) => {
+                let mut s = f.debug_map();
+                for (key, value) in fields.iter() {
+                    s.entry(
+                        &key.as_ref().map(|value| TrackedFmtValue {
+                            value,
+                            arcs: self.arcs,
+                        }),
+                        &value.as_ref().map(|value| TrackedFmtValue {
+                            value,
+                            arcs: self.arcs,
+                        }),
+                    );
+                }
+                s.finish()
+            }
             RuntimeValue::Primitive(v) => v.fmt(f),
         }
     }
@@ -644,7 +662,7 @@ impl<'v, 'a> fmt::Debug for TrackedFmtValue<'v, 'a> {
 impl<'a> RuntimeValue<'a> {
     pub fn function_sync(
         f: impl 'a
-            + Copy
+            + Clone
             + Send
             + Sync
             + for<'e> Fn(
@@ -652,12 +670,15 @@ impl<'a> RuntimeValue<'a> {
                 Vec<DependentValue<RuntimeValue<'a>>>,
             ) -> DependentValue<RuntimeValue<'a>>,
     ) -> Self {
-        Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a) })))
+        Self::Function(Arc::new(move |e, a| {
+            let f = f.clone();
+            Box::pin(async move { f(e, a) })
+        }))
     }
 
     pub fn function_async(
         f: impl 'a
-            + Copy
+            + Clone
             + Send
             + Sync
             + for<'e> Fn(
@@ -666,7 +687,10 @@ impl<'a> RuntimeValue<'a> {
             )
                 -> Pin<Box<dyn 'e + Future<Output = DependentValue<RuntimeValue<'a>>>>>,
     ) -> Self {
-        Self::Function(Arc::new(move |e, a| Box::pin(async move { f(e, a).await })))
+        Self::Function(Arc::new(move |e, a| {
+            let f = f.clone();
+            Box::pin(async move { f(e, a).await })
+        }))
     }
 
     pub fn record(
@@ -744,6 +768,14 @@ impl<'a> RuntimeValue<'a> {
     pub fn resource<R>(ctx: ExecutionContext<'a>, r: R) -> DependentValue<RuntimeValue<'a>>
     where
         R: 'a + Clone + Resource + Send + Sync,
+        R::State: TypeOf,
+    {
+        Self::dynamic_resource(ctx, TypeBasedResource(r))
+    }
+
+    pub fn dynamic_resource<R>(ctx: ExecutionContext<'a>, r: R) -> DependentValue<RuntimeValue<'a>>
+    where
+        R: 'a + Clone + Resource + IdentifyResource + Send + Sync,
     {
         RuntimeValue::Function(Arc::new(move |executor, mut args| {
             let r = r.clone();

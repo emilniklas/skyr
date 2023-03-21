@@ -92,7 +92,7 @@ impl Resource for FileResource {
         })
     }
 
-    async fn delete(&self, prev: Self::State) -> io::Result<()> {
+    async fn delete(prev: Self::State) -> io::Result<()> {
         async_std::fs::remove_file(&prev.path).await
     }
 }

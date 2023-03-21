@@ -7,3 +7,6 @@ pub mod tfplugin5 {
 
 mod provider_client;
 pub use provider_client::*;
+
+mod provider_plugin;
+pub use provider_plugin::*;

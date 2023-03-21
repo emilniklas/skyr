@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_std::sync::Mutex;
 use colored::{Color, Colorize};
+use skyr::execute::RuntimeValue;
 use skyr::{
     Collection, Diff, Plan, PlanExecutionEvent, Primitive, ResourceError, ResourceState, Value,
 };
@@ -77,7 +78,28 @@ impl<R: Read, W: Write> GuiState<R, W> {
         write!(self.w, "{:?}", error)
     }
 
+    pub fn print_runtime_value<'a>(&mut self, value: &RuntimeValue<'a>) -> io::Result<()> {
+        match value {
+            RuntimeValue::Primitive(p) => self.print_primitive(p),
+            RuntimeValue::Collection(c) => self.print_collection(c, |s, v| {
+                if let Some(v) = v.as_resolved() {
+                    s.print_runtime_value(v)
+                } else {
+                    Ok(())
+                }
+            }),
+            RuntimeValue::Deferred(_) => write!(self.w, "{}", "<deferred>".bright_purple()),
+            RuntimeValue::Function(_) => write!(self.w, "{}", "<fn>".bright_magenta()),
+        }
+    }
+
     pub fn print_plan<'a>(&mut self, plan: &Plan<'a>) -> io::Result<()> {
+        for (span, value) in plan.debug_messages() {
+            write!(self.w, "{} ", format!("{:?}", span).bright_black())?;
+            self.print_runtime_value(value)?;
+            self.print_newline()?;
+        }
+
         if plan.is_empty() {
             if plan.is_continuation() {
                 writeln!(self.w, "{}", "Nothing more to do".bright_green().bold())?;
@@ -255,6 +277,19 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 self.print_newline()?;
                 write!(self.w, "}}")
             }
+            Diff::Dict(d) => {
+                write!(self.w, "{{")?;
+                self.indentation += 1;
+                for (key, value) in d {
+                    self.print_newline()?;
+                    self.print_value(key)?;
+                    write!(self.w, ": ")?;
+                    self.print_diff(value)?;
+                }
+                self.indentation -= 1;
+                self.print_newline()?;
+                write!(self.w, "}}")
+            }
         }
     }
 
@@ -311,6 +346,19 @@ impl<R: Read, W: Write> GuiState<R, W> {
                     self.print_newline()?;
                     write!(self.w, "{}: ", name.italic())?;
                     f(self, element)?;
+                }
+                self.indentation -= 1;
+                self.print_newline()?;
+                write!(self.w, "}}")
+            }
+            Collection::Dict(d) => {
+                write!(self.w, "{{")?;
+                self.indentation += 1;
+                for (key, value) in d {
+                    self.print_newline()?;
+                    f(self, key)?;
+                    write!(self.w, ": ")?;
+                    f(self, value)?;
                 }
                 self.indentation -= 1;
                 self.print_newline()?;
