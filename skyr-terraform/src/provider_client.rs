@@ -367,7 +367,11 @@ impl ProviderSchema {
         }
     }
 
-    pub fn as_type(&self, with_name: &str) -> Type {
+    pub fn as_type(
+        &self,
+        with_name: &str,
+        identity_fields: &BTreeMap<&'static str, Vec<&'static str>>,
+    ) -> Type {
         let prefix = format!("{}_", with_name);
         let upper_name = with_name.to_class_case();
         let resources = Type::record(
@@ -376,8 +380,11 @@ impl ProviderSchema {
                 .map(|(name, schema)| (name.replacen(&prefix, "", 1).to_class_case(), schema))
                 .map(|(name, schema)| {
                     let mut arg_type = schema.as_arguments_type();
-                    if let Type::Record(fields) = &mut arg_type {
-                        fields.insert(0, ("skyrKey".into(), Type::String));
+                    let identity_fields = identity_fields.get(name.as_str());
+                    if identity_fields.is_none() {
+                        if let Type::Record(fields) = &mut arg_type {
+                            fields.insert(0, ("skyrKey".into(), Type::String));
+                        }
                     }
                     let result_type = schema.as_attributes_type();
                     (

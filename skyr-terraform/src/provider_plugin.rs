@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ pub struct ProviderPlugin {
     upper_name: String,
     client: ProviderClient,
     schema: Arc<ProviderSchema>,
+    identity_fields: BTreeMap<&'static str, Vec<&'static str>>,
 }
 
 impl ProviderPlugin {
@@ -35,10 +37,26 @@ impl ProviderPlugin {
                     upper_name: name.to_class_case(),
                     name,
                     schema: Arc::new(schema),
+                    identity_fields: Default::default(),
                 })
             }
             .compat(),
         )
+    }
+
+    pub fn with_identity_field(mut self, resource: &'static str, field_name: &'static str) -> Self {
+        self.identity_fields
+            .entry(resource)
+            .and_modify(|v| v.push(field_name))
+            .or_insert_with(|| vec![field_name]);
+        self
+    }
+
+    pub fn with_identity_fields(mut self, resource: &'static str, field_names: impl IntoIterator<Item = &'static str>) -> Self {
+        for field in field_names {
+            self = self.with_identity_field(resource, field);
+        }
+        self
     }
 }
 
@@ -49,22 +67,26 @@ impl Plugin for ProviderPlugin {
     }
 
     fn module_type(&self) -> skyr::analyze::Type {
-        self.schema.as_type(&self.name)
+        self.schema.as_type(&self.name, &self.identity_fields)
     }
 
     fn module_value<'a>(&self, ctx: ExecutionContext<'a>) -> RuntimeValue<'a> {
         let provider_name = self.name.clone();
         let schema = self.schema.clone();
         let client = self.client.clone();
+        let identity_fields = self.identity_fields.clone();
         RuntimeValue::function_async(move |_, mut args| {
             let ctx = ctx.clone();
             let schema = schema.clone();
             let client = client.clone();
             let provider_name = provider_name.clone();
+            let identity_fields = identity_fields.clone();
             Box::pin(async move {
                 let provider_arg = known!(args.remove(0).into_value());
 
-                let provider = Provider::new(provider_name, schema, client, provider_arg).await;
+                let provider =
+                    Provider::new(provider_name, schema, client, provider_arg, identity_fields)
+                        .await;
 
                 RuntimeValue::record(provider.resources().map(|resource| {
                     (
@@ -97,6 +119,7 @@ impl Plugin for ProviderPlugin {
                         Arc::new(schema),
                         client,
                         meta_state.provider_arg,
+                        self.identity_fields.clone(),
                     )
                     .await;
 
@@ -118,6 +141,7 @@ struct Provider {
     schema: Arc<ProviderSchema>,
     client: ProviderClient,
     arg: Value,
+    identity_fields: BTreeMap<&'static str, Vec<&'static str>>,
 }
 
 impl Provider {
@@ -145,6 +169,7 @@ impl Provider {
         schema: Arc<ProviderSchema>,
         mut client: ProviderClient,
         arg: Value,
+        identity_fields: BTreeMap<&'static str, Vec<&'static str>>,
     ) -> Self {
         if let Some(schema) = schema.provider_schema() {
             let arg = ResourceResource::apply_arg_to_schema(&schema, &arg);
@@ -156,6 +181,7 @@ impl Provider {
             client,
             name: name.into(),
             arg,
+            identity_fields,
         }
     }
 
@@ -167,7 +193,9 @@ impl Provider {
         self.schema
             .resource_schemas()
             .into_iter()
-            .map(|(name, schema)| ResourceResource::new(self.clone(), name, schema))
+            .map(|(name, schema)| {
+                ResourceResource::new(self.clone(), name, schema, &self.identity_fields)
+            })
     }
 }
 
@@ -188,15 +216,24 @@ struct ResourceResource {
     name: String,
     schema: Schema<'static>,
     provider: Provider,
+    identity_fields: Option<Vec<&'static str>>,
 }
 
 impl ResourceResource {
-    pub fn new(provider: Provider, name: impl Into<String>, schema: Schema) -> Self {
-        ResourceResource {
+    pub fn new(
+        provider: Provider,
+        name: impl Into<String>,
+        schema: Schema,
+        identity_fields: &BTreeMap<&'static str, Vec<&'static str>>,
+    ) -> Self {
+        let mut rr = ResourceResource {
             schema: schema.as_static(),
             name: name.into(),
             provider,
-        }
+            identity_fields: Default::default(),
+        };
+        rr.identity_fields = identity_fields.get(rr.skyr_name().as_str()).cloned();
+        rr
     }
 
     pub fn skyr_name(&self) -> String {
@@ -232,13 +269,15 @@ impl ResourceResource {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         );
 
-        state.set_member(
-            "skyrKey",
-            arg.as_collection()
-                .access_member("skyrKey")
-                .expect("expected a skyrKey member in arguments")
-                .clone(),
-        );
+        if let None = self.identity_fields {
+            state.set_member(
+                "skyrKey",
+                arg.as_collection()
+                    .access_member("skyrKey")
+                    .expect("expected a skyrKey member in arguments")
+                    .clone(),
+            );
+        }
 
         Ok(())
     }
@@ -285,12 +324,24 @@ impl Resource for ResourceResource {
     type State = Value;
 
     fn id(&self, arg: &Self::Arguments) -> String {
-        arg.as_collection()
-            .access_member("skyrKey")
-            .expect("expected a skyrKey member in arguments")
-            .as_primitive()
-            .as_str()
-            .into()
+        let id_fields = self
+            .identity_fields
+            .as_ref()
+            .map(Vec::as_slice)
+            .unwrap_or(&["skyrKey"]);
+        let mut segments = vec![];
+
+        for field in id_fields {
+            segments.push(
+                arg.as_collection()
+                    .access_member(field)
+                    .or_else(|| self.provider.arg.as_collection().access_member(field))
+                    .map(|v| v.as_primitive().as_str())
+                    .unwrap_or(""),
+            );
+        }
+
+        segments.join("::")
     }
 
     async fn create(&self, arg: Self::Arguments) -> io::Result<Self::State> {
