@@ -1235,7 +1235,6 @@ dependencies = [
  "futures",
  "rmp-serde",
  "serde",
- "serde_json",
  "skyr-derive",
 ]
 

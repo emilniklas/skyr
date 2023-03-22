@@ -13,7 +13,7 @@ use async_std::process::{Child, Command};
 use inflector::Inflector;
 use serde_json::Value as JSONValue;
 use skyr::analyze::Type;
-use skyr::{Collection, Value};
+use skyr::{Collection, Primitive, Value};
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
@@ -273,27 +273,68 @@ impl ProviderClient {
                 .map(Cow::Owned)
                 .map(DynamicValue::V6),
         };
-        Ok(new_state.map(DynamicValue::into_value).and_then(|v| v.nil_to_none()))
+        Ok(new_state
+            .map(DynamicValue::into_value)
+            .and_then(|v| v.nil_to_none()))
     }
 
     pub async fn update(
         &mut self,
         resource_name: &str,
-        arg: Value,
+        new_state: Value,
         prev_state: Value,
     ) -> tonic::Result<Value> {
-        dbg!(("UPDATE", resource_name, arg, &prev_state));
-        Ok(prev_state)
+        let new_state = match self {
+            Self::V5(_, c) => {
+                let new_state = DynamicValue::v5(&new_state);
+                let response = c
+                    .apply_resource_change(tfplugin5::apply_resource_change::Request {
+                        type_name: resource_name.into(),
+                        provider_meta: None,
+                        planned_private: vec![],
+                        planned_state: Some(new_state.clone()),
+                        prior_state: Some(DynamicValue::v5(&prev_state)),
+                        config: Some(new_state),
+                    })
+                    .await?
+                    .into_inner();
+                if !response.diagnostics.is_empty() {
+                    return Err(tonic::Status::new(
+                        tonic::Code::Aborted,
+                        format!("{:?}", response.diagnostics),
+                    ));
+                }
+                response.new_state.map(Cow::Owned).map(DynamicValue::V5)
+            }
+            Self::V6(_, _) => todo!(),
+        };
+        Ok(new_state.unwrap().into_value())
     }
 
-    pub async fn delete(
-        &mut self,
-        resource_name: &str,
-        provider_arg: Value,
-        prev_state: Value,
-    ) -> tonic::Result<()> {
-        dbg!(("DELETE", resource_name, provider_arg, prev_state));
-        Ok(())
+    pub async fn delete(&mut self, resource_name: &str, prev_state: Value) -> tonic::Result<()> {
+        match self {
+            Self::V5(_, c) => {
+                let response = c
+                    .apply_resource_change(tfplugin5::apply_resource_change::Request {
+                        type_name: resource_name.into(),
+                        provider_meta: None,
+                        planned_private: vec![],
+                        planned_state: Some(DynamicValue::v5(&Value::Primitive(Primitive::Nil))),
+                        prior_state: Some(DynamicValue::v5(&prev_state)),
+                        config: Some(DynamicValue::v5(&Value::Primitive(Primitive::Nil))),
+                    })
+                    .await?
+                    .into_inner();
+                if !response.diagnostics.is_empty() {
+                    return Err(tonic::Status::new(
+                        tonic::Code::Aborted,
+                        format!("{:?}", response.diagnostics),
+                    ));
+                }
+                Ok(())
+            }
+            Self::V6(_, _) => todo!(),
+        }
     }
 }
 
@@ -301,7 +342,6 @@ impl ProviderClient {
 pub enum ProviderSchema {
     V5(tfplugin5::get_provider_schema::Response),
     V6(tfplugin6::get_provider_schema::Response),
-    None,
 }
 
 impl ProviderSchema {
@@ -309,7 +349,6 @@ impl ProviderSchema {
         match self {
             Self::V5(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V5),
             Self::V6(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V6),
-            Self::None => None,
         }
     }
 
@@ -325,7 +364,6 @@ impl ProviderSchema {
                 .iter()
                 .map(|(name, schema)| (name.as_str(), Schema::V6(Cow::Borrowed(schema))))
                 .collect(),
-            Self::None => Default::default(),
         }
     }
 

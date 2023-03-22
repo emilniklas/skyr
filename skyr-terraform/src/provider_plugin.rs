@@ -85,10 +85,17 @@ impl Plugin for ProviderPlugin {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 if meta_state.provider_name == self.name {
+                    let mut client = self.client.clone();
+
+                    let schema = client
+                        .schema()
+                        .await
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
                     let provider = Provider::new(
                         meta_state.provider_name,
-                        Arc::new(ProviderSchema::None),
-                        self.client.clone(),
+                        Arc::new(schema),
+                        client,
                         meta_state.provider_arg,
                     )
                     .await;
@@ -115,11 +122,21 @@ struct Provider {
 
 impl Provider {
     pub async fn delete_resource(&self, resource_name: &str, state: Value) -> io::Result<()> {
+        let schemas = self.schema.resource_schemas();
+
+        let resource_schema = schemas.get(resource_name).ok_or(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{:?} didn't match a known resource type", resource_name),
+        ))?;
+
+        let state = ResourceResource::apply_arg_to_schema(&resource_schema, &state);
+
         self.client
             .clone()
-            .delete(resource_name, self.arg.clone(), state)
+            .delete(resource_name, state)
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
         Ok(())
     }
 
@@ -130,7 +147,7 @@ impl Provider {
         arg: Value,
     ) -> Self {
         if let Some(schema) = schema.provider_schema() {
-            let arg = apply_arg_to_schema(&schema, &arg);
+            let arg = ResourceResource::apply_arg_to_schema(&schema, &arg);
             client.configure_provider(&arg).await.unwrap();
         }
 
@@ -201,39 +218,65 @@ impl IdentifyResource for ResourceResource {
     }
 }
 
-fn apply_arg_to_schema(schema: &Schema, arg: &Value) -> Value {
-    let mut fields = vec![];
-    if let Some(block) = schema.block() {
-        'attributes: for attribute in block.attributes() {
-            let skyrname = attribute.skyr_name();
+impl ResourceResource {
+    fn apply_meta_to_state(&self, state: &mut Value, arg: &Value) -> io::Result<()> {
+        let state = state.as_collection_mut();
 
-            if let Value::Collection(c) = &arg {
-                if let Some(v) = c.access_member(&skyrname) {
-                    fields.push((attribute.name().to_string().into(), v.clone()));
-                    continue 'attributes;
-                }
-            }
+        state.set_member(
+            TerraformMetaState::FIELD_NAME,
+            Value::serialize(&TerraformMetaState {
+                provider_name: self.provider.name.clone(),
+                provider_arg: self.provider.arg.clone(),
+                resource_name: self.name.clone(),
+            })
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+        );
 
-            fields.push((
-                attribute.name().to_string().into(),
-                Value::Primitive(Primitive::Nil),
-            ));
-        }
-        'blocks: for block in block.nested_blocks() {
-            let tfname = block.type_name().to_string();
-            let skyrname = block.skyr_name();
+        state.set_member(
+            "skyrKey",
+            arg.as_collection()
+                .access_member("skyrKey")
+                .expect("expected a skyrKey member in arguments")
+                .clone(),
+        );
 
-            if let Value::Collection(c) = &arg {
-                if let Some(v) = c.access_member(&skyrname) {
-                    fields.push((tfname.into(), v.clone()));
-                    continue 'blocks;
-                }
-            }
-
-            fields.push((tfname.into(), Value::Primitive(Primitive::Nil)));
-        }
+        Ok(())
     }
-    Value::Collection(Collection::Record(fields))
+
+    fn apply_arg_to_schema(schema: &Schema, arg: &Value) -> Value {
+        let mut fields = vec![];
+        if let Some(block) = schema.block() {
+            'attributes: for attribute in block.attributes() {
+                let skyrname = attribute.skyr_name();
+
+                if let Value::Collection(c) = &arg {
+                    if let Some(v) = c.access_member(&skyrname) {
+                        fields.push((attribute.name().to_string().into(), v.clone()));
+                        continue 'attributes;
+                    }
+                }
+
+                fields.push((
+                    attribute.name().to_string().into(),
+                    Value::Primitive(Primitive::Nil),
+                ));
+            }
+            'blocks: for block in block.nested_blocks() {
+                let tfname = block.type_name().to_string();
+                let skyrname = block.skyr_name();
+
+                if let Value::Collection(c) = &arg {
+                    if let Some(v) = c.access_member(&skyrname) {
+                        fields.push((tfname.into(), v.clone()));
+                        continue 'blocks;
+                    }
+                }
+
+                fields.push((tfname.into(), Value::Primitive(Primitive::Nil)));
+            }
+        }
+        Value::Collection(Collection::Record(fields))
+    }
 }
 
 #[async_trait::async_trait]
@@ -251,7 +294,7 @@ impl Resource for ResourceResource {
     }
 
     async fn create(&self, arg: Self::Arguments) -> io::Result<Self::State> {
-        let state = apply_arg_to_schema(&self.schema, &arg);
+        let state = Self::apply_arg_to_schema(&self.schema, &arg);
 
         let mut state = self
             .provider
@@ -261,27 +304,7 @@ impl Resource for ResourceResource {
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        {
-            let state = state.as_collection_mut();
-
-            state.set_member(
-                TerraformMetaState::FIELD_NAME,
-                Value::serialize(&TerraformMetaState {
-                    provider_name: self.provider.name.clone(),
-                    provider_arg: self.provider.arg.clone(),
-                    resource_name: self.name.clone(),
-                })
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-            );
-
-            state.set_member(
-                "skyrKey",
-                arg.as_collection()
-                    .access_member("skyrKey")
-                    .expect("expected a skyrKey member in arguments")
-                    .clone(),
-            );
-        }
+        self.apply_meta_to_state(&mut state, &arg)?;
 
         Ok(state)
     }
@@ -291,7 +314,7 @@ impl Resource for ResourceResource {
         prev: Self::State,
         arg: &mut Self::Arguments,
     ) -> io::Result<Option<Self::State>> {
-        let state = apply_arg_to_schema(&self.schema, &prev);
+        let state = Self::apply_arg_to_schema(&self.schema, &prev);
         self.provider
             .client
             .clone()
@@ -301,11 +324,18 @@ impl Resource for ResourceResource {
     }
 
     async fn update(&self, arg: Self::Arguments, prev: Self::State) -> io::Result<Self::State> {
-        self.provider
+        let new_state = Self::apply_arg_to_schema(&self.schema, &arg);
+
+        let mut state = self
+            .provider
             .client
             .clone()
-            .update(&self.name, arg, prev)
+            .update(&self.name, new_state, prev)
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        self.apply_meta_to_state(&mut state, &arg)?;
+
+        Ok(state)
     }
 }

@@ -5,11 +5,8 @@ google = Google {
   project: "emilbroman"
 }
 
-id = Random.Identifier {
-  name: "network-id"
-}
-
-google.ComputeNetwork {
-  skyrKey: "my-network"
-  name: "my-network-" + id.hex
+account = google.ServiceAccount {
+  skyrKey: "skyr"
+  accountId: "skyr-test-account"
+  displayName: "Skyr Test Account"
 }
