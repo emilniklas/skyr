@@ -1,0 +1,17 @@
+[package]
+name = "skyr-google-cloud"
+version = "4.58.0"
+edition = "2021"
+
+[lib]
+name = "std_skyr_google_cloud"
+crate_type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+skyr = { path = "../skyr" }
+skyr-terraform = { path = "../skyr-terraform" }
+
+[build-dependencies]
+skyr-terraform = { path = "../skyr-terraform" }

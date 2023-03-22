@@ -8,4 +8,5 @@ members = [
   "skyr-optional",
   "skyr-random",
   "skyr-terraform",
+  "skyr-google-cloud",
 ]

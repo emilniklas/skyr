@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::prelude::PermissionsExt;
 use std::sync::Arc;
 
 use crate::{ProviderClient, ProviderSchema, Schema};
@@ -12,6 +12,7 @@ use skyr::{
     known, Collection, IdentifyResource, Plugin, Primitive, Resource, ResourceId, ResourceState,
     Value,
 };
+use tokio::io::AsyncWriteExt;
 
 pub struct ProviderPlugin {
     name: String,
@@ -22,20 +23,29 @@ pub struct ProviderPlugin {
 }
 
 impl ProviderPlugin {
-    pub fn new(name: impl Into<String>, path: impl Into<PathBuf>) -> io::Result<Self> {
-        let path = path.into();
-        let name = name.into();
+    pub fn new(provider_name: &str, executable_bytes: &[u8]) -> io::Result<Self> {
         async_std::task::block_on(
             async move {
-                let mut client = ProviderClient::connect(&path).await?;
+                let mut executable_file = async_tempfile::TempFile::new()
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+                executable_file
+                    .set_permissions(std::fs::Permissions::from_mode(0o755))
+                    .await?;
+
+                executable_file.write_all(executable_bytes).await?;
+                executable_file.flush().await?;
+
+                let mut client = ProviderClient::connect(executable_file.file_path()).await?;
                 let schema = client
                     .schema()
                     .await
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 Ok(ProviderPlugin {
                     client,
-                    upper_name: name.to_class_case(),
-                    name,
+                    upper_name: provider_name.to_class_case(),
+                    name: provider_name.to_string(),
                     schema: Arc::new(schema),
                     identity_fields: Default::default(),
                 })
@@ -52,7 +62,11 @@ impl ProviderPlugin {
         self
     }
 
-    pub fn with_identity_fields(mut self, resource: &'static str, field_names: impl IntoIterator<Item = &'static str>) -> Self {
+    pub fn with_identity_fields(
+        mut self,
+        resource: &'static str,
+        field_names: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
         for field in field_names {
             self = self.with_identity_field(resource, field);
         }
