@@ -578,7 +578,7 @@ impl Parser for Expression {
 #[derive(Debug)]
 pub struct IntegerLiteral {
     pub span: Span,
-    pub value: i128,
+    pub value: i64,
 }
 
 impl Visitable for IntegerLiteral {

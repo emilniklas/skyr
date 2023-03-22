@@ -3,12 +3,17 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
+use async_compat::CompatExt;
+use async_std::io::prelude::BufReadExt;
+use async_std::io::BufReader;
+use async_std::os::unix::net::UnixStream;
+use async_std::process::{Child, Command};
 use inflector::Inflector;
 use serde_json::Value as JSONValue;
 use skyr::analyze::Type;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::UnixStream;
+use skyr::{Collection, Value};
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
@@ -16,13 +21,47 @@ use crate::{tfplugin5, tfplugin6};
 
 #[derive(Debug, Clone)]
 pub enum ProviderClient {
-    V5(tfplugin5::provider_client::ProviderClient<Channel>),
-    V6(tfplugin6::provider_client::ProviderClient<Channel>),
+    V5(
+        Arc<ExitOnDrop>,
+        tfplugin5::provider_client::ProviderClient<Channel>,
+    ),
+    V6(
+        Arc<ExitOnDrop>,
+        tfplugin6::provider_client::ProviderClient<Channel>,
+    ),
+}
+
+#[derive(Debug)]
+pub enum ExitOnDrop {
+    V5(Child, tfplugin5::provider_client::ProviderClient<Channel>),
+    V6(Child, tfplugin6::provider_client::ProviderClient<Channel>),
+}
+
+impl Drop for ExitOnDrop {
+    fn drop(&mut self) {
+        async_std::task::block_on(
+            async move {
+                match self {
+                    Self::V5(c, p) => {
+                        p.stop(tfplugin5::stop::Request {}).await.unwrap();
+                        c.kill().unwrap();
+                    }
+                    Self::V6(c, p) => {
+                        p.stop_provider(tfplugin6::stop_provider::Request {})
+                            .await
+                            .unwrap();
+                        c.kill().unwrap();
+                    }
+                }
+            }
+            .compat(),
+        )
+    }
 }
 
 impl ProviderClient {
     pub async fn connect(executable: &Path) -> io::Result<Self> {
-        let mut c = tokio::process::Command::new(executable)
+        let mut c = Command::new(executable)
             .env(
                 "TF_PLUGIN_MAGIC_COOKIE",
                 "d602bf8f470bc67ca7faa0386276bbdd4330efaf76d1a219cb4d6991ca9872b2",
@@ -42,26 +81,31 @@ impl ProviderClient {
         let _core_protocol_version: Option<i32> = props.next().and_then(|s| s.parse().ok());
         let proto_version: i32 = props.next().and_then(|s| s.parse().ok()).unwrap();
         let _network = props.next();
-        let uri = props.next().unwrap();
+        let uri = props.next().unwrap().to_string();
         let _proto_type = props.next();
 
-        let mut file = Some(UnixStream::connect(uri).await?);
         let channel = Endpoint::try_from("http://[::]:50051")
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .connect_with_connector(service_fn(move |_| {
-                let file = file.take();
-                async move { std::io::Result::Ok(file.unwrap()) }
+                let uri = uri.clone();
+                async move {
+                    let file = UnixStream::connect(uri).await?;
+                    std::io::Result::Ok(file.compat())
+                }
+                .compat()
             }))
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         match proto_version {
-            5 => Ok(Self::V5(tfplugin5::provider_client::ProviderClient::new(
-                channel,
-            ))),
-            6 => Ok(Self::V6(tfplugin6::provider_client::ProviderClient::new(
-                channel,
-            ))),
+            5 => {
+                let p = tfplugin5::provider_client::ProviderClient::new(channel);
+                Ok(Self::V5(Arc::new(ExitOnDrop::V5(c, p.clone())), p))
+            }
+            6 => {
+                let p = tfplugin6::provider_client::ProviderClient::new(channel);
+                Ok(Self::V6(Arc::new(ExitOnDrop::V6(c, p.clone())), p))
+            }
             v => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported proto version {}", v),
@@ -71,17 +115,185 @@ impl ProviderClient {
 
     pub async fn schema(&mut self) -> tonic::Result<ProviderSchema> {
         match self {
-            Self::V5(p) => Ok(ProviderSchema::V5(
+            Self::V5(_, p) => Ok(ProviderSchema::V5(
                 p.get_schema(tfplugin5::get_provider_schema::Request {})
                     .await?
                     .into_inner(),
             )),
-            Self::V6(p) => Ok(ProviderSchema::V6(
+            Self::V6(_, p) => Ok(ProviderSchema::V6(
                 p.get_provider_schema(tfplugin6::get_provider_schema::Request {})
                     .await?
                     .into_inner(),
             )),
         }
+    }
+
+    pub async fn configure_provider(&mut self, arg: &Value) -> io::Result<()> {
+        let mut diagnostics: Vec<_> = match self {
+            Self::V5(_, p) => {
+                let response = p
+                    .prepare_provider_config(tfplugin5::prepare_provider_config::Request {
+                        config: Some(tfplugin5::DynamicValue {
+                            json: vec![],
+                            msgpack: rmp_serde::to_vec(arg)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                        }),
+                    })
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                    .into_inner();
+
+                response
+                    .diagnostics
+                    .into_iter()
+                    .map(Diagnostic::V5)
+                    .collect()
+            }
+            Self::V6(_, p) => p
+                .validate_provider_config(tfplugin6::validate_provider_config::Request {
+                    config: Some(tfplugin6::DynamicValue {
+                        json: vec![],
+                        msgpack: rmp_serde::to_vec(arg)
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                    }),
+                })
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .into_inner()
+                .diagnostics
+                .into_iter()
+                .map(Diagnostic::V6)
+                .collect(),
+        };
+
+        match self {
+            Self::V5(_, p) => {
+                let response = p
+                    .configure(tfplugin5::configure::Request {
+                        terraform_version: "x".into(),
+                        config: Some(tfplugin5::DynamicValue {
+                            json: vec![],
+                            msgpack: rmp_serde::to_vec(arg)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                        }),
+                    })
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                    .into_inner();
+
+                diagnostics.extend(response.diagnostics.into_iter().map(Diagnostic::V5));
+            }
+            Self::V6(_, p) => {
+                let response = p
+                    .configure_provider(tfplugin6::configure_provider::Request {
+                        terraform_version: "x".into(),
+                        config: Some(tfplugin6::DynamicValue {
+                            json: vec![],
+                            msgpack: rmp_serde::to_vec(arg)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                        }),
+                    })
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                    .into_inner();
+
+                diagnostics.extend(response.diagnostics.into_iter().map(Diagnostic::V6));
+            }
+        }
+
+        if diagnostics.len() > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("{:?}", diagnostics),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn create(&mut self, resource_name: &str, state: Value) -> tonic::Result<Value> {
+        let new_state = match self {
+            Self::V5(_, c) => {
+                let state = DynamicValue::v5(&state);
+                let response = c
+                    .apply_resource_change(tfplugin5::apply_resource_change::Request {
+                        type_name: resource_name.into(),
+                        provider_meta: None,
+                        planned_private: vec![],
+                        planned_state: Some(state.clone()),
+                        prior_state: Some(DynamicValue::v5(&Value::Collection(
+                            Collection::Record(vec![]),
+                        ))),
+                        config: Some(state),
+                    })
+                    .await?
+                    .into_inner();
+                if !response.diagnostics.is_empty() {
+                    return Err(tonic::Status::new(
+                        tonic::Code::Aborted,
+                        format!("{:?}", response.diagnostics),
+                    ));
+                }
+                response.new_state.map(Cow::Owned).map(DynamicValue::V5)
+            }
+            Self::V6(_, _) => todo!(),
+        };
+        Ok(new_state.unwrap().into_value())
+    }
+
+    pub async fn read(
+        &mut self,
+        resource_name: &str,
+        state: Value,
+        _arg: &mut Value,
+    ) -> tonic::Result<Option<Value>> {
+        let new_state = match self {
+            Self::V5(_, c) => c
+                .read_resource(tfplugin5::read_resource::Request {
+                    type_name: resource_name.into(),
+                    current_state: Some(DynamicValue::v5(&state)),
+                    private: vec![],
+                    provider_meta: None,
+                })
+                .await?
+                .into_inner()
+                .new_state
+                .map(Cow::Owned)
+                .map(DynamicValue::V5),
+            Self::V6(_, c) => c
+                .read_resource(tfplugin6::read_resource::Request {
+                    type_name: resource_name.into(),
+                    current_state: Some(DynamicValue::v6(&state)),
+                    private: vec![],
+                    provider_meta: None,
+                })
+                .await?
+                .into_inner()
+                .new_state
+                .map(Cow::Owned)
+                .map(DynamicValue::V6),
+        };
+        Ok(new_state.map(DynamicValue::into_value).and_then(|v| v.nil_to_none()))
+    }
+
+    pub async fn update(
+        &mut self,
+        resource_name: &str,
+        arg: Value,
+        prev_state: Value,
+    ) -> tonic::Result<Value> {
+        dbg!(("UPDATE", resource_name, arg, &prev_state));
+        Ok(prev_state)
+    }
+
+    pub async fn delete(
+        &mut self,
+        resource_name: &str,
+        provider_arg: Value,
+        prev_state: Value,
+    ) -> tonic::Result<()> {
+        dbg!(("DELETE", resource_name, provider_arg, prev_state));
+        Ok(())
     }
 }
 
@@ -89,6 +301,7 @@ impl ProviderClient {
 pub enum ProviderSchema {
     V5(tfplugin5::get_provider_schema::Response),
     V6(tfplugin6::get_provider_schema::Response),
+    None,
 }
 
 impl ProviderSchema {
@@ -96,6 +309,7 @@ impl ProviderSchema {
         match self {
             Self::V5(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V5),
             Self::V6(s) => s.provider.as_ref().map(Cow::Borrowed).map(Schema::V6),
+            Self::None => None,
         }
     }
 
@@ -111,6 +325,7 @@ impl ProviderSchema {
                 .iter()
                 .map(|(name, schema)| (name.as_str(), Schema::V6(Cow::Borrowed(schema))))
                 .collect(),
+            Self::None => Default::default(),
         }
     }
 
@@ -137,7 +352,11 @@ impl ProviderSchema {
                 }),
         );
 
-        if let Some(arg) = self.provider_schema().as_ref().map(Schema::as_arguments_type) {
+        if let Some(arg) = self
+            .provider_schema()
+            .as_ref()
+            .map(Schema::as_arguments_type)
+        {
             Type::function([arg], resources).into_named(upper_name)
         } else {
             resources.into_named(upper_name)
@@ -176,6 +395,35 @@ impl<'a> Schema<'a> {
         self.block()
             .map(|b| b.as_attributes_type())
             .unwrap_or(Type::Void)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DynamicValue<'a> {
+    V5(Cow<'a, tfplugin5::DynamicValue>),
+    V6(Cow<'a, tfplugin6::DynamicValue>),
+}
+
+impl<'a> DynamicValue<'a> {
+    pub fn v5(value: &Value) -> tfplugin5::DynamicValue {
+        tfplugin5::DynamicValue {
+            json: vec![],
+            msgpack: rmp_serde::to_vec(value).unwrap(),
+        }
+    }
+
+    pub fn v6(value: &Value) -> tfplugin6::DynamicValue {
+        tfplugin6::DynamicValue {
+            json: vec![],
+            msgpack: rmp_serde::to_vec(value).unwrap(),
+        }
+    }
+
+    pub fn into_value(self) -> Value {
+        match self {
+            Self::V5(v) => rmp_serde::from_slice(&v.msgpack).unwrap(),
+            Self::V6(v) => rmp_serde::from_slice(&v.msgpack).unwrap(),
+        }
     }
 }
 
@@ -286,6 +534,10 @@ impl<'a> NestedBlock<'a> {
         }
     }
 
+    pub fn skyr_name(&self) -> String {
+        self.type_name().to_plural().to_camel_case()
+    }
+
     pub fn block(&self) -> Option<Block> {
         match self {
             Self::V5(b) => b.block.as_ref().map(Cow::Borrowed).map(Block::V5),
@@ -352,6 +604,10 @@ impl<'a> Attribute<'a> {
         }
     }
 
+    pub fn skyr_name(&self) -> String {
+        self.name().to_camel_case()
+    }
+
     pub fn computed(&self) -> bool {
         match self {
             Self::V5(a) => a.computed,
@@ -415,4 +671,10 @@ fn type_from_json_value(value: &JSONValue) -> Type {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum Diagnostic {
+    V5(tfplugin5::Diagnostic),
+    V6(tfplugin6::Diagnostic),
 }

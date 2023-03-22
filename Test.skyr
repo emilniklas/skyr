@@ -1,9 +1,15 @@
+import Random
 import Google
 
 google = Google {
+  project: "emilbroman"
+}
+
+id = Random.Identifier {
+  name: "network-id"
 }
 
 google.ComputeNetwork {
   skyrKey: "my-network"
-  name: "my-network"
+  name: "my-network-" + id.hex
 }

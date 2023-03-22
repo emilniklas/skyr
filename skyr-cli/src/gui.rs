@@ -75,7 +75,7 @@ struct GuiState<R, W> {
 
 impl<R: Read, W: Write> GuiState<R, W> {
     pub fn print_io_error(&mut self, error: io::Error) -> io::Result<()> {
-        write!(self.w, "{:?}", error)
+        writeln!(self.w, "{}", error.to_string().red())
     }
 
     pub fn print_runtime_value<'a>(&mut self, value: &RuntimeValue<'a>) -> io::Result<()> {

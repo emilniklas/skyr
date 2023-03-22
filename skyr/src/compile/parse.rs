@@ -52,7 +52,7 @@ pub enum TokenKind<'a> {
 
     Symbol(&'a str),
     StringLiteral(Cow<'a, str>, bool),
-    Integer(i128),
+    Integer(i64),
 
     Unknown(char),
 }
@@ -195,7 +195,7 @@ impl<'a> Lexer<'a> {
         let integer = &self.code[..len];
         self.code = &self.code[len..];
 
-        TokenKind::Integer(integer.parse().unwrap_or(i128::MAX))
+        TokenKind::Integer(integer.parse().unwrap_or(i64::MAX))
     }
 
     fn symbol_or_keyword(&mut self) -> TokenKind<'a> {

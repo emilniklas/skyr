@@ -2,7 +2,7 @@ use std::fmt;
 
 use futures::Future;
 
-use crate::{Collection, ResourceId};
+use crate::{Collection, ResourceId, Value};
 
 use super::{Executor, RuntimeValue};
 
@@ -33,6 +33,12 @@ impl<T: fmt::Debug> fmt::Debug for DependentValue<T> {
             InnerDependentValue::Pending => write!(f, "<pending>"),
             InnerDependentValue::Resolved(t) => t.fmt(f),
         }
+    }
+}
+
+impl<'a> DependentValue<RuntimeValue<'a>> {
+    pub fn into_value(self) -> DependentValue<Value> {
+        self.flat_map(RuntimeValue::into_value)
     }
 }
 

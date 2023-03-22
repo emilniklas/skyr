@@ -48,7 +48,7 @@ impl Serialize for Value {
     {
         match self {
             Value::Primitive(Primitive::Nil) => serializer.serialize_none(),
-            Value::Primitive(Primitive::Integer(i)) => serializer.serialize_i128(*i),
+            Value::Primitive(Primitive::Integer(i)) => serializer.serialize_i64(*i),
             Value::Primitive(Primitive::Float(f)) => serializer.serialize_f64(*f),
             Value::Primitive(Primitive::Boolean(b)) => serializer.serialize_bool(*b),
             Value::Primitive(Primitive::String(s)) => serializer.serialize_str(s.as_ref()),
@@ -507,14 +507,84 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         E: serde::de::Error,
     {
-        Ok(Value::Primitive(Primitive::Integer(v)))
+        Ok(Value::Primitive(Primitive::i128(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::i64(v)))
+    }
+
+    fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::i32(v)))
+    }
+
+    fn visit_i16<E>(self, v: i16) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::i16(v)))
+    }
+
+    fn visit_i8<E>(self, v: i8) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::i8(v)))
+    }
+
+    fn visit_u128<E>(self, v: u128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::u128(v)))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::u64(v)))
+    }
+
+    fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::u32(v)))
+    }
+
+    fn visit_u16<E>(self, v: u16) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::u16(v)))
+    }
+
+    fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::u8(v)))
     }
 
     fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
-        Ok(Value::Primitive(Primitive::Float(v)))
+        Ok(Value::Primitive(Primitive::f64(v)))
+    }
+
+    fn visit_f32<E>(self, v: f32) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Primitive(Primitive::f32(v)))
     }
 
     fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
@@ -567,11 +637,48 @@ impl<'de> Visitor<'de> for ValueVisitor {
         }
         Ok(Value::Collection(Collection::Dict(fields)))
     }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(Value::Primitive(Primitive::Nil))
+    }
+
+    fn visit_char<E>(self, v: char) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let mut s = String::with_capacity(1);
+        s.push(v);
+        Ok(Value::Primitive(Primitive::String(s.into())))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Value::Collection(Collection::list(
+            v.into_iter().copied().map(Primitive::u8),
+        )))
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_bytes(&v)
+    }
 }
 
 enum Deserializable<'de> {
     Value(&'de Value),
-    FieldName(&'de Cow<'de, str>),
+    FieldName(Cow<'de, str>),
+    Nil,
 }
 
 impl<'de> fmt::Debug for Deserializable<'de> {
@@ -579,6 +686,7 @@ impl<'de> fmt::Debug for Deserializable<'de> {
         match self {
             Self::Value(v) => v.fmt(f),
             Self::FieldName(v) => v.fmt(f),
+            Self::Nil => write!(f, "<nil>"),
         }
     }
 }
@@ -594,7 +702,7 @@ impl<'de> ValueDeserializer<'de> {
         }
     }
 
-    pub fn new_field_name(value: &'de Cow<'de, str>) -> Self {
+    pub fn new_field_name(value: Cow<'de, str>) -> Self {
         Self {
             value: Deserializable::FieldName(value),
         }
@@ -610,9 +718,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     {
         match self.value {
             Deserializable::Value(Value::Primitive(Primitive::Nil)) => visitor.visit_none(),
-            Deserializable::Value(Value::Primitive(Primitive::Integer(i))) => {
-                visitor.visit_i128(*i)
-            }
+            Deserializable::Value(Value::Primitive(Primitive::Integer(i))) => visitor.visit_i64(*i),
             Deserializable::Value(Value::Primitive(Primitive::Float(f))) => visitor.visit_f64(*f),
             Deserializable::Value(Value::Primitive(Primitive::Boolean(b))) => {
                 visitor.visit_bool(*b)
@@ -626,13 +732,15 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
             }
             Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
                 visitor.visit_map(ValueMapDeserializer {
-                    iterator: d.iter(),
+                    iterator: d
+                        .iter()
+                        .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
                     trailing_value: None,
                 })
             }
             Deserializable::Value(Value::Collection(Collection::Record(r))) => {
                 visitor.visit_map(ValueStructMapDeserializer {
-                    iterator: r.iter().map(|(k, v)| (k, v)),
+                    iterator: r.iter().map(|(k, v)| (k.clone(), Deserializable::Value(v))),
                     trailing_value: None,
                 })
             }
@@ -640,6 +748,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
                 visitor.visit_seq(ValueSeqDeserializer { iterator: t.iter() })
             }
             Deserializable::FieldName(f) => visitor.visit_str(f.as_ref()),
+            Deserializable::Nil => visitor.visit_none(),
         }
     }
 
@@ -724,7 +833,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     {
         match self.value {
             Deserializable::Value(Value::Primitive(Primitive::Integer(v))) => {
-                visitor.visit_i128(*v)
+                visitor.visit_i128(*v as _)
             }
             v => Err(SerializationError::Other(format!(
                 "{:?} is not an integer",
@@ -937,7 +1046,9 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if let Deserializable::Value(Value::Primitive(Primitive::Nil)) = self.value {
+        if let Deserializable::Value(Value::Primitive(Primitive::Nil)) | Deserializable::Nil =
+            self.value
+        {
             visitor.visit_none()
         } else {
             visitor.visit_some(self)
@@ -1038,7 +1149,9 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
         match self.value {
             Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
                 visitor.visit_map(ValueMapDeserializer {
-                    iterator: d.iter(),
+                    iterator: d
+                        .iter()
+                        .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
                     trailing_value: None,
                 })
             }
@@ -1060,24 +1173,35 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     {
         match self.value {
             Deserializable::Value(Value::Collection(Collection::Record(r))) => {
-                let fields = fields
-                    .into_iter()
-                    .map(|field| match r.iter().find(|(k, _)| k == field) {
-                        None => Err(SerializationError::Other(format!(
-                            "Field {:?} is missing in {:?}",
-                            field, self.value
-                        ))),
-                        Some((k, v)) => Ok((k, v)),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-
                 visitor.visit_map(ValueStructMapDeserializer {
                     trailing_value: None,
-                    iterator: fields.into_iter(),
+                    iterator: fields.into_iter().map(|field| {
+                        match r.iter().find(|(k, _)| k == field) {
+                            None => (Cow::Owned(field.to_string()), Deserializable::Nil),
+                            Some((k, v)) => (k.clone(), Deserializable::Value(v)),
+                        }
+                    }),
+                })
+            }
+            Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
+                visitor.visit_map(ValueMapDeserializer {
+                    trailing_value: None,
+                    iterator: fields.into_iter().map(|field| {
+                        d.iter()
+                            .find(|(k, _)| match k {
+                                Value::Primitive(Primitive::String(k)) => k == field,
+                                _ => false,
+                            })
+                            .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v)))
+                            .unwrap_or((
+                                Deserializable::FieldName(Cow::Borrowed(field)),
+                                Deserializable::Nil,
+                            ))
+                    }),
                 })
             }
             v => Err(SerializationError::Other(format!(
-                "{:?} is not a record or string map",
+                "{:?} is not a record or dictionary with string keys",
                 v
             ))),
         }
@@ -1241,20 +1365,14 @@ impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
         match self.value {
             Some(v @ Value::Collection(Collection::Tuple(t))) if t.len() == 2 => {
                 if let Value::Collection(Collection::Record(r)) = &t[1] {
-                    let fields = fields
-                        .into_iter()
-                        .map(|field| match r.iter().find(|(k, _)| k == field) {
-                            None => Err(SerializationError::Other(format!(
-                                "Field {:?} is missing in {:?}",
-                                field, self.value
-                            ))),
-                            Some((k, v)) => Ok((k, v)),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-
                     visitor.visit_map(ValueStructMapDeserializer {
                         trailing_value: None,
-                        iterator: fields.into_iter(),
+                        iterator: fields.into_iter().map(|field| {
+                            match r.iter().find(|(k, _)| k == field) {
+                                None => (Cow::Owned(field.to_string()), Deserializable::Nil),
+                                Some((k, v)) => (k.clone(), Deserializable::Value(v)),
+                            }
+                        }),
                     })
                 } else {
                     Err(SerializationError::Other(format!(
@@ -1298,12 +1416,12 @@ where
 
 struct ValueMapDeserializer<'de, I> {
     iterator: I,
-    trailing_value: Option<&'de Value>,
+    trailing_value: Option<Deserializable<'de>>,
 }
 
 impl<'de, I> MapAccess<'de> for ValueMapDeserializer<'de, I>
 where
-    I: Iterator<Item = &'de (Value, Value)>,
+    I: Iterator<Item = (Deserializable<'de>, Deserializable<'de>)>,
 {
     type Error = SerializationError;
 
@@ -1313,7 +1431,7 @@ where
     {
         if let Some((key, value)) = self.iterator.next() {
             self.trailing_value = Some(value);
-            Ok(Some(seed.deserialize(ValueDeserializer::new(key))?))
+            Ok(Some(seed.deserialize(ValueDeserializer { value: key })?))
         } else {
             Ok(None)
         }
@@ -1323,22 +1441,23 @@ where
     where
         V: serde::de::DeserializeSeed<'de>,
     {
-        seed.deserialize(ValueDeserializer::new(
-            self.trailing_value
+        seed.deserialize(ValueDeserializer {
+            value: self
+                .trailing_value
                 .take()
                 .ok_or_else(|| SerializationError::Other("value without key".to_string()))?,
-        ))
+        })
     }
 }
 
 struct ValueStructMapDeserializer<'de, I> {
     iterator: I,
-    trailing_value: Option<&'de Value>,
+    trailing_value: Option<Deserializable<'de>>,
 }
 
 impl<'de, I> MapAccess<'de> for ValueStructMapDeserializer<'de, I>
 where
-    I: Iterator<Item = (&'de Cow<'de, str>, &'de Value)>,
+    I: Iterator<Item = (Cow<'de, str>, Deserializable<'de>)>,
 {
     type Error = SerializationError;
 
@@ -1360,11 +1479,12 @@ where
     where
         V: serde::de::DeserializeSeed<'de>,
     {
-        seed.deserialize(ValueDeserializer::new(
-            self.trailing_value
+        seed.deserialize(ValueDeserializer {
+            value: self
+                .trailing_value
                 .take()
                 .ok_or_else(|| SerializationError::Other("value without key".to_string()))?,
-        ))
+        })
     }
 }
 
@@ -1425,6 +1545,7 @@ mod tests {
             k: K,
             l: L,
             m: M,
+            n: Vec<u8>,
         }
 
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -1462,6 +1583,7 @@ mod tests {
             k: K,
             l: L("whatever".into()),
             m: M("m".into(), 123),
+            n: vec![255, 255, 255, 255],
         };
 
         let serialized = Value::serialize(&input).unwrap();
@@ -1469,5 +1591,49 @@ mod tests {
         let output: X = serialized.deserialize().unwrap();
 
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn serializing_from_derive_into_value() {
+        #[derive(Serialize)]
+        struct X {
+            a: Vec<u8>,
+        }
+
+        let serialized = Value::serialize(&X { a: vec![1, 2, 3] }).unwrap();
+        let value: Value = serialized.deserialize().unwrap();
+
+        assert_eq!(
+            value,
+            Value::Collection(Collection::Dict(vec![(
+                Value::Primitive(Primitive::String("a".into())),
+                Value::Collection(Collection::List(vec![
+                    Value::Primitive(Primitive::Integer(1)),
+                    Value::Primitive(Primitive::Integer(2)),
+                    Value::Primitive(Primitive::Integer(3)),
+                ]))
+            )]))
+        )
+    }
+
+    #[test]
+    fn serializing_from_value_into_deserialize() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct X {
+            a: Vec<u8>,
+        }
+
+        let serialized = Value::serialize(&Value::Collection(Collection::Dict(vec![(
+            Value::Primitive(Primitive::String("a".into())),
+            Value::Collection(Collection::List(vec![
+                Value::Primitive(Primitive::Integer(1)),
+                Value::Primitive(Primitive::Integer(2)),
+                Value::Primitive(Primitive::Integer(3)),
+            ])),
+        )])))
+        .unwrap();
+        let value: X = serialized.deserialize().unwrap();
+
+        assert_eq!(value, X { a: vec![1, 2, 3] })
     }
 }

@@ -7,12 +7,15 @@ edition = "2021"
 
 [dependencies]
 Inflector = "0.11.4"
+async-compat = "0.2.1"
+async-std = { version = "1.12.0", features = ["unstable"] }
 async-trait = "0.1.66"
 prost = "0.11.8"
+rmp-serde = "1.1.1"
 serde = "1.0.154"
 serde_json = "1.0.94"
 skyr = { path = "../skyr" }
-tokio = { version = "1.26.0", features = ["full"] }
+tokio = "1.26.0"
 tonic = "0.8.3"
 tower = "0.4.13"
 

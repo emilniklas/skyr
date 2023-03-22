@@ -48,6 +48,14 @@ impl Value {
             panic!("{:?} is not a primitive", self)
         }
     }
+
+    pub fn nil_to_none(self) -> Option<Value> {
+        if let Value::Primitive(Primitive::Nil) = self {
+            None
+        } else {
+            Some(self)
+        }
+    }
 }
 
 impl<T: Into<Primitive>> From<T> for Value {
@@ -101,7 +109,7 @@ impl<'a> From<RuntimeValue<'a>> for DependentValue<Value> {
 pub enum Primitive {
     Nil,
     String(Cow<'static, str>),
-    Integer(i128),
+    Integer(i64),
     Float(f64),
     Boolean(bool),
 }
@@ -156,12 +164,12 @@ impl Primitive {
     }
 
     pub fn i128(i: i128) -> Self {
-        Self::Integer(i)
+        Self::Integer(i as _)
     }
 
     pub fn as_i128(&self) -> i128 {
         if let Self::Integer(i) = self {
-            *i
+            *i as _
         } else {
             panic!("{:?} is not an integer", self)
         }
