@@ -1,12 +1,16 @@
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_std::sync::Mutex;
-use colored::{Color, Colorize};
+use colored::{Color, ColoredString, Colorize};
+use skyr::analyze::{Type, TypeError, TypeId};
+use skyr::compile::{CompileError, Location, ParseError, Span, Token, TokenKind};
 use skyr::execute::RuntimeValue;
 use skyr::{
-    Collection, Diff, Plan, PlanExecutionEvent, Primitive, ResourceError, ResourceState, Value,
+    Collection, Diff, Plan, PlanExecutionEvent, Primitive, ResourceError, ResourceState, Source,
+    Value,
 };
 
 pub struct Gui<R, W> {
@@ -29,6 +33,14 @@ impl<R: Read, W: Write> Gui<R, W> {
                 value_color: None,
             })),
         }
+    }
+
+    pub async fn print_compile_error(
+        &self,
+        error: CompileError,
+        sources: &Vec<Source>,
+    ) -> io::Result<()> {
+        self.s.lock().await.print_compile_error(error, sources)
     }
 
     pub async fn print_io_error(&self, error: io::Error) -> io::Result<()> {
@@ -93,6 +105,14 @@ impl<R: Read, W: Write> GuiState<R, W> {
         }
     }
 
+    fn indent(&mut self) {
+        self.indentation += 2;
+    }
+
+    fn unindent(&mut self) {
+        self.indentation -= 2;
+    }
+
     pub fn print_plan<'a>(&mut self, plan: &Plan<'a>) -> io::Result<()> {
         for (span, value) in plan.debug_messages() {
             write!(self.w, "{} ", format!("{:?}", span).bright_black())?;
@@ -144,9 +164,9 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 "+".green().bold(),
                 format!("{:?}", id.type_).bold()
             )?;
-            self.indentation += 1;
+            self.indent();
             self.print_value(args)?;
-            self.indentation -= 1;
+            self.unindent();
             self.print_newline()?;
         }
 
@@ -159,9 +179,9 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 "↑".yellow().bold(),
                 format!("{:?}", id.type_).bold()
             )?;
-            self.indentation += 1;
+            self.indent();
             self.print_diff(diff)?;
-            self.indentation -= 1;
+            self.unindent();
             self.print_newline()?;
         }
 
@@ -214,7 +234,7 @@ impl<R: Read, W: Write> GuiState<R, W> {
     }
 
     fn print_newline(&mut self) -> io::Result<()> {
-        write!(self.w, "\n{:width$}", "", width = self.indentation * 2)
+        write!(self.w, "\n{:width$}", "", width = self.indentation)
     }
 
     fn print_diff<'a>(&mut self, diff: Diff<'a>) -> io::Result<()> {
@@ -245,48 +265,48 @@ impl<R: Read, W: Write> GuiState<R, W> {
             }
             Diff::List(l) => {
                 write!(self.w, "[")?;
-                self.indentation += 1;
+                self.indent();
                 for element in l {
                     self.print_newline()?;
                     self.print_diff(element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "]")
             }
             Diff::Tuple(l) => {
                 write!(self.w, "(")?;
-                self.indentation += 1;
+                self.indent();
                 for element in l {
                     self.print_newline()?;
                     self.print_diff(element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, ")")
             }
             Diff::Record(r) => {
                 write!(self.w, "{{")?;
-                self.indentation += 1;
+                self.indent();
                 for (name, element) in r {
                     self.print_newline()?;
                     write!(self.w, "{}: ", name.italic())?;
                     self.print_diff(element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "}}")
             }
             Diff::Dict(d) => {
                 write!(self.w, "{{")?;
-                self.indentation += 1;
+                self.indent();
                 for (key, value) in d {
                     self.print_newline()?;
                     self.print_value(key)?;
                     write!(self.w, ": ")?;
                     self.print_diff(value)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "}}")
             }
@@ -319,48 +339,48 @@ impl<R: Read, W: Write> GuiState<R, W> {
         match collection {
             Collection::Tuple(l) => {
                 write!(self.w, "(")?;
-                self.indentation += 1;
+                self.indent();
                 for element in l {
                     self.print_newline()?;
                     f(self, element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, ")")
             }
             Collection::List(l) => {
                 write!(self.w, "[")?;
-                self.indentation += 1;
+                self.indent();
                 for element in l {
                     self.print_newline()?;
                     f(self, element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "]")
             }
             Collection::Record(r) => {
                 write!(self.w, "{{")?;
-                self.indentation += 1;
+                self.indent();
                 for (name, element) in r {
                     self.print_newline()?;
                     write!(self.w, "{}: ", name.italic())?;
                     f(self, element)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "}}")
             }
             Collection::Dict(d) => {
                 write!(self.w, "{{")?;
-                self.indentation += 1;
+                self.indent();
                 for (key, value) in d {
                     self.print_newline()?;
                     f(self, key)?;
                     write!(self.w, ": ")?;
                     f(self, value)?;
                 }
-                self.indentation -= 1;
+                self.unindent();
                 self.print_newline()?;
                 write!(self.w, "}}")
             }
@@ -371,11 +391,11 @@ impl<R: Read, W: Write> GuiState<R, W> {
         write!(self.w, "{} ", format!("{:?}", state.id.type_).bold())?;
 
         if !state.dependencies.is_empty() {
-            self.indentation += 1;
+            self.indent();
 
             self.print_newline()?;
             write!(self.w, "{}", "depends on".blue().bold())?;
-            self.indentation += 1;
+            self.indent();
             for dep in state.dependencies.iter() {
                 self.print_newline()?;
                 write!(
@@ -385,14 +405,14 @@ impl<R: Read, W: Write> GuiState<R, W> {
                     format!("{:?}", dep.id).bright_blue()
                 )?;
             }
-            self.indentation -= 1;
+            self.unindent();
             self.print_newline()?;
         }
 
         self.print_value(&state.state)?;
 
         if !state.dependencies.is_empty() {
-            self.indentation -= 1;
+            self.unindent();
         }
         self.print_newline()
     }
@@ -404,6 +424,71 @@ impl<R: Read, W: Write> GuiState<R, W> {
         self.r.read_line(&mut line)?;
         self.print_newline()?;
         Ok(line == "yes\n")
+    }
+
+    const TYPE_VAR_CHARS: [char; 26] = [
+        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
+        's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    ];
+
+    pub fn print_type(&mut self, type_: &Type, open_types: &mut Vec<TypeId>) -> io::Result<()> {
+        match type_ {
+            Type::Void => write!(self.w, "{}", "Void".bright_black().bold()),
+            Type::String => write!(self.w, "{}", "String".bold()),
+            Type::Integer => write!(self.w, "{}", "Integer".bold()),
+            Type::Float => write!(self.w, "{}", "Float".bold()),
+            Type::Boolean => write!(self.w, "{}", "Boolean".bold()),
+            Type::Open(id) => {
+                let idx = open_types
+                    .iter()
+                    .enumerate()
+                    .find(|(_, oid)| *oid == id)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or_else(|| {
+                        let idx = open_types.len();
+                        open_types.push(*id);
+                        idx
+                    });
+                let idx = idx % Self::TYPE_VAR_CHARS.len();
+                let ch = Self::TYPE_VAR_CHARS[idx];
+                write!(self.w, "{}", format!("{}", ch).bold().italic())
+            }
+            Type::Named(n, _) => write!(self.w, "{}", n.bold()),
+            Type::Function(p, r) => {
+                if p.len() != 1 {
+                    write!(self.w, "{}", "(".bright_black())?;
+                }
+                for param in p {
+                    self.print_type(param, open_types)?;
+                }
+                if p.len() != 1 {
+                    write!(self.w, "{}", ")".bright_black())?;
+                }
+
+                write!(self.w, "{}", " -> ".bright_black())?;
+
+                self.print_type(r, open_types)
+            }
+            Type::Optional(t) => {
+                self.print_type(t, open_types)?;
+                write!(self.w, "{}", "?".bold())
+            }
+            Type::Record(r) => self.print_collection(&Collection::record(r.clone()), |s, t| {
+                s.print_type(t, open_types)
+            }),
+            Type::List(element) => {
+                write!(self.w, "{}", "[".bright_black())?;
+                self.print_type(element, open_types)?;
+                write!(self.w, "{}", "]".bright_black())
+            }
+            Type::Map(key, value) => {
+                write!(self.w, "{}", "{".bright_black())?;
+                self.print_type(key, open_types)?;
+                write!(self.w, "{}", ": ".bright_black())?;
+                self.print_type(value, open_types)?;
+                write!(self.w, "{}", "}".bright_black())
+            }
+        }
     }
 
     pub fn print_plan_execution_event(&mut self, event: PlanExecutionEvent) -> io::Result<()> {
@@ -489,5 +574,286 @@ impl<R: Read, W: Write> GuiState<R, W> {
             self.print_resource_error(error)?;
         }
         Ok(())
+    }
+
+    pub fn print_compile_error(
+        &mut self,
+        error: CompileError,
+        sources: &Vec<Source>,
+    ) -> io::Result<()> {
+        let sources = sources.iter().map(|s| (s.name(), s)).collect();
+
+        self.do_print_compile_error(error, &sources)
+    }
+
+    fn do_print_compile_error(
+        &mut self,
+        error: CompileError,
+        sources: &BTreeMap<&str, &Source>,
+    ) -> io::Result<()> {
+        match error {
+            CompileError::Cons(a, b) => {
+                self.do_print_compile_error(*a, sources)?;
+                self.do_print_compile_error(*b, sources)
+            }
+
+            CompileError::ParseError(ParseError::Expected(expectation, span)) => self
+                .do_print_string_error(
+                    expectation,
+                    span.as_ref().and_then(|span| {
+                        sources
+                            .get(span.source_name.as_str())
+                            .copied()
+                            .map(|s| (span, s))
+                    }),
+                ),
+
+            CompileError::UndefinedReference(reference_name, span) => {
+                let source = sources
+                    .get(span.source_name.as_str())
+                    .copied()
+                    .map(|s| (&span, s));
+                self.do_print_string_error(&format!("`{}` is not defined", reference_name), source)
+            }
+
+            CompileError::TypeError(TypeError::Mismatch { lhs, rhs, span }) => {
+                let source = sources
+                    .get(span.source_name.as_str())
+                    .copied()
+                    .map(|s| (&span, s));
+                self.do_print_error(
+                    |s| {
+                        write!(s.w, "{}", "Type mismatch:".red())?;
+
+                        let mut open_types = vec![];
+
+                        s.indent();
+                        s.print_newline()?;
+                        s.print_type(&rhs, &mut open_types)?;
+                        s.unindent();
+                        s.print_newline()?;
+
+                        write!(s.w, "{}", "is not assignable to".red())?;
+
+                        s.indent();
+                        s.print_newline()?;
+                        s.print_type(&lhs, &mut open_types)?;
+                        s.unindent();
+
+                        Ok(())
+                    },
+                    source,
+                )
+            }
+
+            CompileError::TypeError(TypeError::MissingField {
+                lhs: _,
+                rhs,
+                field,
+                span,
+            }) => {
+                let source = sources
+                    .get(span.source_name.as_str())
+                    .copied()
+                    .map(|s| (&span, s));
+                self.do_print_error(
+                    |s| {
+                        write!(
+                            s.w,
+                            "{} {} {} ",
+                            "Field".red(),
+                            field.italic(),
+                            "is missing in".red()
+                        )?;
+                        s.indent();
+                        s.print_type(&rhs, &mut vec![])?;
+                        s.unindent();
+
+                        Ok(())
+                    },
+                    source,
+                )
+            }
+
+            CompileError::TypeError(TypeError::UnresolvedImport { name, span }) => {
+                let source = sources
+                    .get(span.source_name.as_str())
+                    .copied()
+                    .map(|s| (&span, s));
+                self.do_print_string_error(&format!("No module named `{}` is loaded", name), source)
+            }
+
+            CompileError::TypeError(TypeError::WrongNumberOfArguments { lhs, rhs, span }) => {
+                let source = sources
+                    .get(span.source_name.as_str())
+                    .copied()
+                    .map(|s| (&span, s));
+                self.do_print_string_error(
+                    &format!(
+                        "Function has {} parameter(s) but was given {} arguments",
+                        lhs, rhs
+                    ),
+                    source,
+                )
+            }
+        }
+    }
+
+    fn do_print_string_error(
+        &mut self,
+        error: &str,
+        source: Option<(&Span, &Source)>,
+    ) -> io::Result<()> {
+        self.do_print_error(|f| write!(f.w, "{}", error.red()), source)
+    }
+
+    fn do_print_error(
+        &mut self,
+        error: impl FnOnce(&mut Self) -> io::Result<()>,
+        source: Option<(&Span, &Source)>,
+    ) -> io::Result<()> {
+        match source {
+            None => error(self),
+
+            Some((span, source)) => {
+                let start_line = span.range.start.line.checked_sub(3).unwrap_or(0);
+                let end_line = span.range.end.line + 3;
+
+                let mut gutter_width = 2;
+                let mut rest = end_line;
+                while rest > 0 {
+                    gutter_width += 1;
+                    rest /= 10;
+                }
+
+                let tokens = source
+                    .lex()
+                    .filter(|t| t.span.range.end.line >= start_line)
+                    .filter(|t| t.span.range.start.line <= end_line);
+
+                let mut error = Some(error);
+
+                let mut location = Location {
+                    line: start_line,
+                    ..Default::default()
+                };
+
+                writeln!(
+                    self.w,
+                    "{} ",
+                    format!("{}", span.source_name).bright_black()
+                )?;
+                write!(
+                    self.w,
+                    "{:>gutter_width$}",
+                    format!("{}  ", location.line,).bright_black(),
+                    gutter_width = gutter_width
+                )?;
+                for token in tokens {
+                    if token.span.range.start.line > span.range.end.line {
+                        if let Some(error) = error.take() {
+                            let before = self.indentation;
+                            self.indentation +=
+                                gutter_width + span.range.start.character as usize - 1;
+                            self.print_newline()?;
+                            error(self)?;
+                            self.indentation = before;
+                        }
+                    }
+
+                    while token.span.range.start.line > location.line {
+                        location.increment_line();
+                        self.print_newline()?;
+                        write!(
+                            self.w,
+                            "{}",
+                            format!(
+                                "{:>gutter_width$}",
+                                format!("{}  ", location.line),
+                                gutter_width = gutter_width
+                            )
+                            .bright_black()
+                        )?;
+                    }
+
+                    while token.span.range.start.character > location.character {
+                        location.increment_character();
+                        write!(self.w, " ")?;
+                    }
+
+                    self.print_token(&token, &mut location, |c| {
+                        if span.includes(&token.span) {
+                            c.underline().bright_red()
+                        } else {
+                            c
+                        }
+                    })?;
+                }
+
+                if let Some(error) = error.take() {
+                    let before = self.indentation;
+                    self.indentation += gutter_width + span.range.start.character as usize - 1;
+                    self.print_newline()?;
+                    error(self)?;
+                    self.indentation = before;
+                }
+
+                self.print_newline()?;
+
+                Ok(())
+            }
+        }
+    }
+
+    fn print_token(
+        &mut self,
+        token: &Token,
+        location: &mut Location,
+        f: impl FnOnce(ColoredString) -> ColoredString,
+    ) -> io::Result<()> {
+        let lexeme = token.kind.lexeme();
+        location.character += lexeme.len() as u64;
+        use TokenKind::*;
+        let colorized = match &token.kind {
+            Plus
+            | OpenCurly
+            | CloseCurly
+            | OpenParen
+            | CloseParen
+            | OpenAngle
+            | CloseAngle
+            | OpenSquare
+            | CloseSquare
+            | Arrow
+            | FatArrow
+            | Colon
+            | Comma
+            | Period
+            | EqualSign
+            | QuestionMark
+            | LessThanOrEqualSign
+            | GreaterThanOrEqualSign
+            | DoubleEqualSign
+            | NotEqualSign
+            | Minus
+            | Slash
+            | Asterisk => lexeme.bright_black(),
+
+            TypeKeyword | FnKeyword | ReturnKeyword | DebugKeyword | ImportKeyword
+            | TrueKeyword | FalseKeyword | IfKeyword | ElseKeyword | AndKeyword | OrKeyword
+            | NilKeyword => lexeme.blue().bold(),
+
+            Symbol(s) => {
+                if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    lexeme.bold()
+                } else {
+                    lexeme.italic()
+                }
+            }
+            StringLiteral(_, _) => lexeme.bright_green(),
+            Integer(_) => lexeme.purple(),
+            Unknown(_) => lexeme.red(),
+        };
+        write!(self.w, "{}", f(colorized))
     }
 }

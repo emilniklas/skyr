@@ -94,7 +94,7 @@ impl<'a> TypeEnvironment<'a> {
 
                 let return_type = self.unify(self.resolve(*lhs_r), self.resolve(*rhs_r), span);
 
-                Type::Function(params, Box::new(return_type))
+                self.resolve(Type::Function(params, Box::new(return_type)))
             }
             (Type::Named(n, lhs), rhs) => Type::Named(
                 n.clone(),
@@ -478,13 +478,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         let parameter_types = function
             .parameters
             .iter()
-            .map(|param| {
-                param
-                    .type_
-                    .as_ref()
-                    .map(|pt| self.check_type_expression(pt))
-                    .unwrap_or_default()
-            })
+            .map(|param| self.check_parameter(param))
             .collect();
 
         let return_type = function
@@ -520,13 +514,42 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         }
     }
 
+    pub fn check_parameter(&mut self, parameter: &'a Parameter) -> Type {
+        if let Some(t) = self.cache.get(&parameter.id) {
+            return t.clone();
+        }
+
+        if let Some(c) = self.checking.get_mut(&parameter.id) {
+            let type_ = Type::open();
+            c.push(type_.clone());
+            return type_;
+        }
+
+        self.checking.insert(parameter.id, vec![]);
+
+        let mut type_ = parameter
+            .type_
+            .as_ref()
+            .map(|t| self.check_type_expression(t))
+            .unwrap_or_default();
+
+        let mut errors = vec![];
+        let mut env = TypeEnvironment::new(&mut errors);
+
+        for recursive in self.checking.remove(&parameter.id).unwrap_or_default() {
+            type_ = env.unify(type_, recursive, &parameter.span);
+        }
+
+        self.cache.insert(parameter.id, type_.clone());
+
+        let t = env.resolve(type_);
+        self.errors.extend(errors);
+        t
+    }
+
     pub fn check_declaration(&mut self, declaration: Declaration<'a>) -> Type {
         match declaration {
-            Declaration::Parameter(p) => p
-                .type_
-                .as_ref()
-                .map(|t| self.check_type_expression(t))
-                .unwrap_or_default(),
+            Declaration::Parameter(p) => self.check_parameter(p),
             Declaration::Assignment(a) => self.check_assignment(a),
             Declaration::TypeDefinition(td) => self.check_type_definition(td),
             Declaration::Import(i) => self.check_import(i),

@@ -71,9 +71,11 @@ async fn do_main(
             .enumerate()
             .map(|(idx, dylib)| {
                 let lib = libloading::Library::new(dylib).unwrap();
-                let func: libloading::Symbol<unsafe extern "C" fn(u64) -> *mut dyn Plugin> =
-                    lib.get(b"skyr_plugin").unwrap();
-                Box::from_raw(func(idx as _))
+                move || {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64) -> *mut dyn Plugin> =
+                        lib.get(b"skyr_plugin").unwrap();
+                    Box::from_raw(func(idx as _))
+                }
             })
             .collect()
     };
@@ -89,7 +91,7 @@ async fn do_main(
 async fn teardown(
     gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<impl Fn() -> Box<dyn Plugin>>,
 ) -> io::Result<ExitCode> {
     let state = state().await;
 
@@ -103,7 +105,7 @@ async fn teardown(
             move |_, _| {
                 Box::pin(async move {
                     for plugin in plugins.iter() {
-                        if let Some(()) = plugin.delete_matching_resource(&resource).await? {
+                        if let Some(()) = plugin().delete_matching_resource(&resource).await? {
                             return Ok(());
                         }
                     }
@@ -204,16 +206,13 @@ async fn inspect_state(gui: Gui<impl Read, impl Write>) -> io::Result<ExitCode> 
 
 async fn plan(
     gui: Gui<impl Read, impl Write>,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
 ) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
+    let sources = sources?;
 
-    let program = skyr::Program::new(sources?)
-        .compile(plugins)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let program = program
-        .analyze()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let program = compile(&gui, &sources, plugins).await?;
+    let program = analyze(&gui, &sources, &program).await?;
 
     let plan = match program.plan(&state).await {
         Ok(p) => p,
@@ -231,19 +230,44 @@ async fn plan(
     }
 }
 
+async fn compile(
+    gui: &Gui<impl Read, impl Write>,
+    sources: &Vec<Source>,
+    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
+) -> io::Result<skyr::ParsedProgram> {
+    match skyr::Program::new(&sources).compile(plugins) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            gui.print_compile_error(e, sources).await?;
+            Err(io::Error::new(io::ErrorKind::Other, "Compilation failed"))
+        }
+    }
+}
+
+async fn analyze<'a>(
+    gui: &Gui<impl Read, impl Write>,
+    sources: &Vec<Source>,
+    program: &'a skyr::ParsedProgram,
+) -> io::Result<skyr::AnalyzedProgram<'a>> {
+    match program.analyze() {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            gui.print_compile_error(e, sources).await?;
+            Err(io::Error::new(io::ErrorKind::Other, "Compilation failed"))
+        }
+    }
+}
+
 async fn apply(
     gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
 ) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
+    let sources = sources?;
 
-    let program = skyr::Program::new(sources?)
-        .compile(plugins)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let program = program
-        .analyze()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let program = compile(&gui, &sources, plugins).await?;
+    let program = analyze(&gui, &sources, &program).await?;
 
     let mut exit_code = ExitCode::SUCCESS;
     {

@@ -1,21 +1,21 @@
 use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
-use crate::{Plan, Plugin, ResourceError, Source, State};
+use crate::{Plan, Plugin, PluginCell, ResourceError, Source, State};
 
-pub struct Program {
-    sources: Vec<Source>,
+pub struct Program<'a> {
+    sources: &'a Vec<Source>,
 }
 
-impl Program {
-    pub fn new(sources: Vec<Source>) -> Self {
+impl<'a> Program<'a> {
+    pub fn new(sources: &'a Vec<Source>) -> Self {
         Self { sources }
     }
 
-    pub fn compile(&self, plugins: Vec<Box<dyn Plugin>>) -> Result<ParsedProgram, CompileError> {
+    pub fn compile(&self, plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>) -> Result<ParsedProgram, CompileError> {
         let mut error = None;
         let mut modules = vec![];
-        for source in &self.sources {
+        for source in self.sources {
             modules.extend(
                 CompileError::coalesce(source.parse(), &mut error).map(|mut module| {
                     module.name = source.module_name();
@@ -26,14 +26,17 @@ impl Program {
         if let Some(error) = error {
             Err(error)
         } else {
-            Ok(ParsedProgram { modules, plugins })
+            Ok(ParsedProgram {
+                modules,
+                plugins: plugins.into_iter().map(PluginCell::new).collect(),
+            })
         }
     }
 }
 
 pub struct ParsedProgram {
     modules: Vec<Module>,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<PluginCell>,
 }
 
 impl ParsedProgram {
@@ -74,7 +77,7 @@ pub struct AnalyzedProgram<'a> {
     import_map: ImportMap<'a>,
     modules: &'a Vec<Module>,
     table: SymbolTable<'a>,
-    plugins: &'a [Box<dyn Plugin>],
+    plugins: &'a [PluginCell],
 }
 
 impl<'a> AnalyzedProgram<'a> {

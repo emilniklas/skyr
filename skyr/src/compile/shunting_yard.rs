@@ -50,7 +50,7 @@ impl ShuntingYard {
                     let lhs = result.pop().expect("sequence error");
 
                     result.push(Expression::BinaryOperation(Box::new(BinaryOperation {
-                        span: lhs.span().start..rhs.span().end,
+                        span: lhs.span().through(&rhs.span()),
                         lhs,
                         operator,
                         rhs,

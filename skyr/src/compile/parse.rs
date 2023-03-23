@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use super::{Location, Span};
 
@@ -57,14 +58,63 @@ pub enum TokenKind<'a> {
     Unknown(char),
 }
 
+impl<'a> TokenKind<'a> {
+    pub fn lexeme(&self) -> Cow<str> {
+        match self {
+            TokenKind::Plus => "+",
+            TokenKind::OpenCurly => "{",
+            TokenKind::CloseCurly => "}",
+            TokenKind::OpenParen => "(",
+            TokenKind::CloseParen => ")",
+            TokenKind::OpenAngle => "<",
+            TokenKind::CloseAngle => ">",
+            TokenKind::OpenSquare => "[",
+            TokenKind::CloseSquare => "]",
+            TokenKind::Arrow => "->",
+            TokenKind::FatArrow => "=>",
+            TokenKind::Colon => ":",
+            TokenKind::Comma => ",",
+            TokenKind::Period => ".",
+            TokenKind::EqualSign => "=",
+            TokenKind::QuestionMark => "?",
+            TokenKind::LessThanOrEqualSign => "<=",
+            TokenKind::GreaterThanOrEqualSign => ">=",
+            TokenKind::DoubleEqualSign => "==",
+            TokenKind::NotEqualSign => "!=",
+            TokenKind::Minus => "-",
+            TokenKind::Slash => "/",
+            TokenKind::Asterisk => "*",
+            TokenKind::TypeKeyword => "type",
+            TokenKind::FnKeyword => "fn",
+            TokenKind::ReturnKeyword => "return",
+            TokenKind::DebugKeyword => "debug",
+            TokenKind::ImportKeyword => "import",
+            TokenKind::TrueKeyword => "true",
+            TokenKind::FalseKeyword => "false",
+            TokenKind::IfKeyword => "if",
+            TokenKind::ElseKeyword => "else",
+            TokenKind::AndKeyword => "and",
+            TokenKind::OrKeyword => "or",
+            TokenKind::NilKeyword => "nil",
+            TokenKind::Symbol(s) => s,
+            TokenKind::StringLiteral(s, _) => return format!("{:?}", s).into(),
+            TokenKind::Integer(i) => return format!("{}", i).into(),
+            TokenKind::Unknown(c) => return format!("{}", c).into(),
+        }
+        .into()
+    }
+}
+
 pub struct Lexer<'a> {
+    source_name: &'a Arc<String>,
     code: &'a str,
     location: Location,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(code: &'a str) -> Self {
+    pub fn new(source_name: &'a Arc<String>, code: &'a str) -> Self {
         Self {
+            source_name,
             code,
             location: Default::default(),
         }
@@ -89,7 +139,10 @@ impl<'a> Lexer<'a> {
         let kind = self.next_token_kind();
         let end = self.location;
         Token {
-            span: start..end,
+            span: Span {
+                source_name: self.source_name.clone(),
+                range: start..end,
+            },
             kind,
         }
     }

@@ -1,6 +1,8 @@
 use std::io;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 
 use crate::analyze::Type;
 use crate::execute::{ExecutionContext, RuntimeValue};
@@ -263,5 +265,45 @@ where
         } else {
             Ok(None)
         }
+    }
+}
+
+enum PluginCellState {
+    Unloaded(Box<dyn Send + Sync + Fn() -> Box<dyn Plugin>>),
+    Loaded(Arc<dyn Plugin>),
+}
+
+pub struct PluginCell {
+    cell: RwLock<PluginCellState>,
+}
+
+impl PluginCell {
+    pub fn new(f: impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>) -> Self {
+        Self {
+            cell: PluginCellState::Unloaded(Box::new(f)).into(),
+        }
+    }
+}
+
+impl PluginCell {
+    pub fn get(&self) -> Arc<dyn Plugin> {
+        {
+            let guard = self.cell.read().unwrap();
+            if let PluginCellState::Loaded(p) = &*guard {
+                return p.clone();
+            }
+        }
+
+        let mut guard = self.cell.write().unwrap();
+        let f = match &mut *guard {
+            PluginCellState::Loaded(p) => return p.clone(),
+            PluginCellState::Unloaded(f) => f,
+        };
+
+        let plugin: Arc<dyn Plugin> = f().into();
+
+        *guard = PluginCellState::Loaded(plugin.clone());
+
+        plugin
     }
 }

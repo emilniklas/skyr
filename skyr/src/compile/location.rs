@@ -1,6 +1,7 @@
 use std::fmt;
+use std::sync::Arc;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
     pub line: u64,
     pub character: u64,
@@ -32,7 +33,34 @@ impl Location {
     }
 }
 
-pub type Span = std::ops::Range<Location>;
+#[derive(Clone)]
+pub struct Span {
+    pub source_name: Arc<String>,
+    pub range: std::ops::Range<Location>,
+}
+
+impl Span {
+    pub fn through(&self, other: &Self) -> Self {
+        if !Arc::ptr_eq(&self.source_name, &other.source_name) {
+            panic!("cannot make a span across modules");
+        }
+
+        Self {
+            source_name: self.source_name.clone(),
+            range: self.range.start.min(other.range.start)..self.range.end.max(other.range.end),
+        }
+    }
+
+    pub fn includes(&self, other: &Self) -> bool {
+        self.range.start <= other.range.start && self.range.end >= other.range.end
+    }
+}
+
+impl fmt::Debug for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{:?}", self.source_name, self.range.start)
+    }
+}
 
 pub trait HasSpan {
     fn span(&self) -> Span;

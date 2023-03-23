@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 
 use super::{HasSpan, ParseError, ParseResult, Parser, ShuntingYard, Span, Token, TokenKind};
 
@@ -135,19 +136,25 @@ impl Parser for Module {
 
     fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
         let mut statements = vec![];
-        let start = tokens.get(0).map(|t| t.span.start).unwrap_or_default();
-        let mut end = start;
+        let start = tokens
+            .get(0)
+            .map(|t| t.span.clone())
+            .unwrap_or_else(|| Span {
+                range: Default::default(),
+                source_name: Arc::new("unknown".into()),
+            });
+        let mut end = start.clone();
         while !tokens.is_empty() {
             let statement;
             (statement, tokens) = Statement::parse(tokens)?;
-            end = statement.span().end;
+            end = statement.span();
             statements.push(statement);
         }
         Ok((
             Module {
                 id: NodeId::new(),
                 name: None,
-                span: start..end,
+                span: start.through(&end),
                 statements,
             },
             tokens,
@@ -267,7 +274,7 @@ impl Parser for Statement {
                     return Ok((
                         Statement::Assignment(Assignment {
                             id: NodeId::new(),
-                            span: identifier.span.start..value.span().end,
+                            span: identifier.span.through(&value.span()),
                             type_: None,
                             identifier,
                             value,
@@ -294,7 +301,7 @@ impl Parser for Statement {
                             return Ok((
                                 Statement::Assignment(Assignment {
                                     id: NodeId::new(),
-                                    span: identifier.span.start..value.span().end,
+                                    span: identifier.span.through(&value.span()),
                                     type_: Some(type_),
                                     identifier,
                                     value,
@@ -489,7 +496,7 @@ impl Parser for Expression {
                     let record;
                     (record, tokens) = Record::parse(tokens)?;
                     expression = Expression::Construct(Box::new(Construct {
-                        span: expression.span().start..record.span.end,
+                        span: expression.span().through(&record.span),
                         subject: expression,
                         record,
                     }));
@@ -504,7 +511,7 @@ impl Parser for Expression {
                     let identifier;
                     (identifier, tokens) = Identifier::parse(tokens)?;
                     expression = Expression::MemberAccess(Box::new(MemberAccess {
-                        span: expression.span().start..identifier.span.end,
+                        span: expression.span().through(&identifier.span),
                         subject: expression,
                         identifier,
                     }));
@@ -543,7 +550,7 @@ impl Parser for Expression {
                     }) = tokens.get(0)
                     {
                         tokens = &tokens[1..];
-                        end = span.end;
+                        end = span;
                     } else {
                         return Err(ParseError::Expected(
                             "end of argument list",
@@ -552,7 +559,7 @@ impl Parser for Expression {
                     }
 
                     expression = Expression::Call(Box::new(Call {
-                        span: expression.span().start..end,
+                        span: expression.span().through(end),
                         callee: expression,
                         arguments,
                     }));
@@ -740,7 +747,7 @@ impl<T: Parser<Output = T> + HasSpan> Parser for Record<T> {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -774,7 +781,7 @@ impl<T: Parser<Output = T> + HasSpan> Parser for Record<T> {
             ..
         }) = tokens.get(0)
         {
-            end = tokens[0].span.end;
+            end = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -785,7 +792,7 @@ impl<T: Parser<Output = T> + HasSpan> Parser for Record<T> {
 
         Ok((
             Record {
-                span: start..end,
+                span: start.through(end),
                 fields,
             },
             tokens,
@@ -832,7 +839,7 @@ impl<T: Parser<Output = T> + HasSpan> Parser for Field<T> {
 
         Ok((
             Field {
-                span: identifier.span.start..value.span().end,
+                span: identifier.span.through(&value.span()),
                 identifier,
                 value,
             },
@@ -950,7 +957,7 @@ impl Parser for TypeDefinition {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -979,7 +986,7 @@ impl Parser for TypeDefinition {
         Ok((
             TypeDefinition {
                 id: NodeId::new(),
-                span: start..type_.span().end,
+                span: start.through(&type_.span()),
                 identifier,
                 type_,
             },
@@ -1074,7 +1081,7 @@ impl Parser for TypeExpression {
                 }) => {
                     tokens = &tokens[1..];
                     type_ = TypeExpression::Optional(Box::new(OptionalTypeExpression {
-                        span: type_.span().start..span.end,
+                        span: type_.span().through(&span),
                         type_,
                     }));
                 }
@@ -1117,7 +1124,7 @@ impl Parser for Function {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -1185,7 +1192,7 @@ impl Parser for Function {
 
             (
                 Block {
-                    span: span.start..expression.span().end,
+                    span: span.through(&expression.span()),
                     statements: vec![Statement::Return(Return {
                         span: expression.span(),
                         expression,
@@ -1199,7 +1206,7 @@ impl Parser for Function {
 
         Ok((
             Function {
-                span: start..body.span.end,
+                span: start.through(&body.span),
                 parameters,
                 return_type,
                 body,
@@ -1246,7 +1253,7 @@ impl Parser for Parameter {
             Ok((
                 Parameter {
                     id: NodeId::default(),
-                    span: identifier.span.start..type_.span().end,
+                    span: identifier.span.through(&type_.span()),
                     identifier,
                     type_: Some(type_),
                 },
@@ -1290,7 +1297,7 @@ impl Parser for Return {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -1303,7 +1310,7 @@ impl Parser for Return {
 
         Ok((
             Return {
-                span: start..expression.span().end,
+                span: start.through(&expression.span()),
                 expression,
             },
             tokens,
@@ -1335,7 +1342,7 @@ impl Parser for Debug {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -1348,7 +1355,7 @@ impl Parser for Debug {
 
         Ok((
             Debug {
-                span: start..expression.span().end,
+                span: start.through(&expression.span()),
                 expression,
             },
             tokens,
@@ -1399,7 +1406,7 @@ impl Parser for Import {
             ..
         }) = tokens.get(0)
         {
-            start = tokens[0].span.start;
+            start = &tokens[0].span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -1413,7 +1420,7 @@ impl Parser for Import {
         Ok((
             Self {
                 id: Default::default(),
-                span: start..identifier.span.end,
+                span: start.through(&identifier.span),
                 identifier,
             },
             tokens,
@@ -1451,7 +1458,7 @@ impl Parser for If {
             span,
         }) = tokens.get(0)
         {
-            start = span.start;
+            start = span;
             tokens = &tokens[1..];
         } else {
             return Err(ParseError::Expected(
@@ -1490,7 +1497,7 @@ impl Parser for If {
 
         let (consequence, mut tokens) = Statement::parse(tokens)?;
 
-        let mut end = consequence.span().end;
+        let mut end = consequence.span();
         let mut else_clause = None;
         if let Some(Token {
             kind: TokenKind::ElseKeyword,
@@ -1501,13 +1508,13 @@ impl Parser for If {
 
             let clause;
             (clause, tokens) = Statement::parse(tokens)?;
-            end = clause.span().end;
+            end = clause.span();
             else_clause = Some(clause);
         }
 
         Ok((
             If {
-                span: start..end,
+                span: start.through(&end),
                 condition,
                 consequence,
                 else_clause,
@@ -1544,7 +1551,7 @@ impl Parser for Block {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            start = span.start;
+            start = span;
         } else {
             return Err(ParseError::Expected(
                 "block",
@@ -1570,7 +1577,7 @@ impl Parser for Block {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            end = span.end;
+            end = span;
         } else {
             return Err(ParseError::Expected(
                 "end of block",
@@ -1580,7 +1587,7 @@ impl Parser for Block {
 
         Ok((
             Block {
-                span: start..end,
+                span: start.through(end),
                 statements,
             },
             tokens,
@@ -1850,7 +1857,7 @@ impl Parser for List {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            start = span.start;
+            start = span;
         } else {
             return Err(ParseError::Expected(
                 "list",
@@ -1884,7 +1891,7 @@ impl Parser for List {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            end = span.end;
+            end = span;
         } else {
             return Err(ParseError::Expected(
                 "end of list",
@@ -1894,7 +1901,7 @@ impl Parser for List {
 
         Ok((
             List {
-                span: start..end,
+                span: start.through(end),
                 elements,
             },
             tokens,
@@ -1927,7 +1934,7 @@ impl Parser for ListTypeExpression {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            start = span.start;
+            start = span;
         } else {
             return Err(ParseError::Expected(
                 "list",
@@ -1944,7 +1951,7 @@ impl Parser for ListTypeExpression {
         }) = tokens.get(0)
         {
             tokens = &tokens[1..];
-            end = span.end;
+            end = span;
         } else {
             return Err(ParseError::Expected(
                 "end of list",
@@ -1954,7 +1961,7 @@ impl Parser for ListTypeExpression {
 
         Ok((
             ListTypeExpression {
-                span: start..end,
+                span: start.through(end),
                 element_type,
             },
             tokens,

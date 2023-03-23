@@ -12,7 +12,7 @@ use futures::StreamExt;
 
 use crate::analyze::{External, ImportMap, SymbolTable};
 use crate::{
-    compile::*, DisplayAsDebug, IdentifyResource, Plugin, Primitive, ResourceError, ResourceId,
+    compile::*, DisplayAsDebug, IdentifyResource, PluginCell, Primitive, ResourceError, ResourceId,
     ResourceState, TypeBasedResource, TypeOf,
 };
 use crate::{Collection, Plan, Value};
@@ -75,12 +75,12 @@ pub struct Executor<'a> {
     plan: RwLock<Plan<'a>>,
     used_resources: RwLock<BTreeSet<ResourceId>>,
     is_pending: AtomicBool,
-    plugins: &'a [Box<dyn Plugin>],
+    plugins: &'a [PluginCell],
     read_errors: RwLock<Vec<ResourceError>>,
 }
 
 impl<'a> Executor<'a> {
-    pub fn new(plugins: &'a [Box<dyn Plugin>]) -> Self {
+    pub fn new(plugins: &'a [PluginCell]) -> Self {
         Executor {
             plan: Default::default(),
             used_resources: Default::default(),
@@ -108,6 +108,7 @@ impl<'a> Executor<'a> {
                     move |_, _| {
                         Box::pin(async move {
                             for plugin in self.plugins.iter() {
+                                let plugin = plugin.get();
                                 if let Some(()) = plugin.delete_matching_resource(&resource).await?
                                 {
                                     return Ok(());
