@@ -108,7 +108,7 @@ impl<'a> Executor<'a> {
                     move |_, _| {
                         Box::pin(async move {
                             for plugin in self.plugins.iter() {
-                                let plugin = plugin.get();
+                                let plugin = plugin.get().await;
                                 if let Some(()) = plugin.delete_matching_resource(&resource).await?
                                 {
                                     return Ok(());
@@ -261,7 +261,7 @@ impl<'a> Executor<'a> {
         ctx: ExecutionContext<'a>,
         import: &'a Import,
     ) -> DependentValue<RuntimeValue<'a>> {
-        let external = ctx.import_map.resolve(import).expect("unresolved import");
+        let external = ctx.import_map.resolve(import).await.expect("unresolved import");
 
         let value = match external {
             External::Module(m) => self.execute_module(ctx.new_empty(), m).await,

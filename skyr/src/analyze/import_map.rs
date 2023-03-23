@@ -14,7 +14,7 @@ impl<'a> ImportMap<'a> {
         Self { modules, plugins }
     }
 
-    pub fn resolve(&self, import: &'a Import) -> Option<External<'a>> {
+    pub async fn resolve(&self, import: &'a Import) -> Option<External<'a>> {
         let symbol = &import.identifier.symbol;
 
         for module in self.modules {
@@ -24,7 +24,7 @@ impl<'a> ImportMap<'a> {
         }
 
         for plugin in self.plugins {
-            let plugin = plugin.get();
+            let plugin = plugin.get().await;
 
             if plugin.import_name() == symbol {
                 return Some(External::Plugin(plugin));

@@ -22,7 +22,7 @@ macro_rules! terraform_plugin {
         );
 
         skyr::export_plugin! {
-            skyr_terraform::ProviderPlugin::new(env!("PROVIDER_NAME"), EMBEDDED_PROVIDER_EXECUTABLE).unwrap()
+            skyr_terraform::ProviderPlugin::new(env!("PROVIDER_NAME"), EMBEDDED_PROVIDER_EXECUTABLE).await.unwrap()
             $(
                 .with_identity_fields(stringify!($resource), [
                     $(

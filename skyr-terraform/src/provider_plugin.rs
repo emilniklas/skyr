@@ -23,35 +23,34 @@ pub struct ProviderPlugin {
 }
 
 impl ProviderPlugin {
-    pub fn new(provider_name: &str, executable_bytes: &[u8]) -> io::Result<Self> {
-        async_std::task::block_on(
-            async move {
-                let mut executable_file = async_tempfile::TempFile::new()
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    pub async fn new(provider_name: &str, executable_bytes: &[u8]) -> io::Result<Self> {
+        async move {
+            let mut executable_file = async_tempfile::TempFile::new()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-                executable_file
-                    .set_permissions(std::fs::Permissions::from_mode(0o755))
-                    .await?;
+            executable_file
+                .set_permissions(std::fs::Permissions::from_mode(0o755))
+                .await?;
 
-                executable_file.write_all(executable_bytes).await?;
-                executable_file.flush().await?;
+            executable_file.write_all(executable_bytes).await?;
+            executable_file.flush().await?;
 
-                let mut client = ProviderClient::connect(executable_file.file_path()).await?;
-                let schema = client
-                    .schema()
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                Ok(ProviderPlugin {
-                    client,
-                    upper_name: provider_name.to_class_case(),
-                    name: provider_name.to_string(),
-                    schema: Arc::new(schema),
-                    identity_fields: Default::default(),
-                })
-            }
-            .compat(),
-        )
+            let mut client = ProviderClient::connect(executable_file.file_path()).await?;
+            let schema = client
+                .schema()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Ok(ProviderPlugin {
+                client,
+                upper_name: provider_name.to_class_case(),
+                name: provider_name.to_string(),
+                schema: Arc::new(schema),
+                identity_fields: Default::default(),
+            })
+        }
+        .compat()
+        .await
     }
 
     pub fn with_identity_field(mut self, resource: &'static str, field_name: &'static str) -> Self {

@@ -1,7 +1,7 @@
 use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
-use crate::{Plan, Plugin, PluginCell, ResourceError, Source, State};
+use crate::{Plan, PluginCell, PluginFactory, ResourceError, Source, State};
 
 pub struct Program<'a> {
     sources: &'a Vec<Source>,
@@ -12,7 +12,7 @@ impl<'a> Program<'a> {
         Self { sources }
     }
 
-    pub fn compile(&self, plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>) -> Result<ParsedProgram, CompileError> {
+    pub fn compile(&self, plugins: Vec<Box<PluginFactory>>) -> Result<ParsedProgram, CompileError> {
         let mut error = None;
         let mut modules = vec![];
         for source in self.sources {

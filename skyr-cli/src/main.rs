@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use async_std::stream::StreamExt;
 use clap::Parser;
 use glob;
-use skyr::{Plan, Plugin, Source, State};
+use skyr::{Plan, PluginFactory, Source, State};
 
 use self::gui::Gui;
 
@@ -71,11 +71,9 @@ async fn do_main(
             .enumerate()
             .map(|(idx, dylib)| {
                 let lib = libloading::Library::new(dylib).unwrap();
-                move || {
-                    let func: libloading::Symbol<unsafe extern "C" fn(u64) -> *mut dyn Plugin> =
-                        lib.get(b"skyr_plugin").unwrap();
-                    Box::from_raw(func(idx as _))
-                }
+                let func: libloading::Symbol<unsafe extern "C" fn(u64) -> *mut PluginFactory> =
+                    lib.get(b"skyr_plugin").unwrap();
+                Box::from_raw(func(idx as _))
             })
             .collect()
     };
@@ -91,7 +89,7 @@ async fn do_main(
 async fn teardown(
     gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
-    plugins: Vec<impl Fn() -> Box<dyn Plugin>>,
+    plugins: Vec<Box<PluginFactory>>,
 ) -> io::Result<ExitCode> {
     let state = state().await;
 
@@ -105,7 +103,8 @@ async fn teardown(
             move |_, _| {
                 Box::pin(async move {
                     for plugin in plugins.iter() {
-                        if let Some(()) = plugin().delete_matching_resource(&resource).await? {
+                        if let Some(()) = plugin().await.delete_matching_resource(&resource).await?
+                        {
                             return Ok(());
                         }
                     }
@@ -206,7 +205,7 @@ async fn inspect_state(gui: Gui<impl Read, impl Write>) -> io::Result<ExitCode> 
 
 async fn plan(
     gui: Gui<impl Read, impl Write>,
-    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
+    plugins: Vec<Box<PluginFactory>>,
 ) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
     let sources = sources?;
@@ -233,7 +232,7 @@ async fn plan(
 async fn compile(
     gui: &Gui<impl Read, impl Write>,
     sources: &Vec<Source>,
-    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
+    plugins: Vec<Box<PluginFactory>>,
 ) -> io::Result<skyr::ParsedProgram> {
     match skyr::Program::new(&sources).compile(plugins) {
         Ok(p) => Ok(p),
@@ -261,7 +260,7 @@ async fn analyze<'a>(
 async fn apply(
     gui: Gui<impl 'static + Read + Send, impl 'static + Write + Send>,
     approve: bool,
-    plugins: Vec<impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>>,
+    plugins: Vec<Box<PluginFactory>>,
 ) -> io::Result<ExitCode> {
     let (sources, state) = futures::future::join(sources(), state()).await;
     let sources = sources?;

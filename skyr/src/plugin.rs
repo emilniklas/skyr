@@ -1,6 +1,8 @@
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use futures::Future;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
@@ -8,13 +10,20 @@ use crate::analyze::Type;
 use crate::execute::{ExecutionContext, RuntimeValue};
 use crate::{ResourceId, ResourceState};
 
+pub type PluginFactory = dyn Send + Sync + Fn() -> Pin<Box<dyn Future<Output = Box<dyn Plugin>>>>;
+
 #[macro_export]
 macro_rules! export_plugin {
     ($plugin:expr) => {
         #[no_mangle]
-        extern "C" fn skyr_plugin(idx: u64) -> *mut dyn skyr::Plugin {
+        extern "C" fn skyr_plugin(idx: u64) -> *mut skyr::PluginFactory {
             skyr::analyze::TypeId::preload(idx);
-            Box::into_raw(Box::new($plugin))
+            Box::into_raw(Box::new(move || {
+                Box::pin(async move {
+                    let b: Box<dyn skyr::Plugin> = Box::new($plugin);
+                    b
+                })
+            }))
         }
     };
 }
@@ -269,7 +278,7 @@ where
 }
 
 enum PluginCellState {
-    Unloaded(Box<dyn Send + Sync + Fn() -> Box<dyn Plugin>>),
+    Unloaded(Box<PluginFactory>),
     Loaded(Arc<dyn Plugin>),
 }
 
@@ -278,15 +287,15 @@ pub struct PluginCell {
 }
 
 impl PluginCell {
-    pub fn new(f: impl 'static + Send + Sync + Fn() -> Box<dyn Plugin>) -> Self {
+    pub fn new(f: Box<PluginFactory>) -> Self {
         Self {
-            cell: PluginCellState::Unloaded(Box::new(f)).into(),
+            cell: PluginCellState::Unloaded(f).into(),
         }
     }
 }
 
 impl PluginCell {
-    pub fn get(&self) -> Arc<dyn Plugin> {
+    pub async fn get(&self) -> Arc<dyn Plugin> {
         {
             let guard = self.cell.read().unwrap();
             if let PluginCellState::Loaded(p) = &*guard {
@@ -300,7 +309,7 @@ impl PluginCell {
             PluginCellState::Unloaded(f) => f,
         };
 
-        let plugin: Arc<dyn Plugin> = f().into();
+        let plugin: Arc<dyn Plugin> = f().await.into();
 
         *guard = PluginCellState::Loaded(plugin.clone());
 

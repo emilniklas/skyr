@@ -304,9 +304,7 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         if let Some(t) = self.cache.get(&import.id) {
             return t.clone();
         }
-        let type_ = self
-            .import_map
-            .resolve(import)
+        let type_ = async_std::task::block_on(self.import_map.resolve(import))
             .map(|i| match i {
                 External::Module(m) => self.check_module(m),
                 External::Plugin(p) => p.module_type(),
