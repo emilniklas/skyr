@@ -55,7 +55,16 @@ async fn do_main(
     let SkyrCli { command } = Parser::parse();
 
     let plugins = unsafe {
-        glob::glob("**/libstd_skyr_*.dylib")
+        #[cfg(target_os = "macos")]
+        let pattern = "**/libskyr_plugin_*.dylib";
+
+        #[cfg(target_os = "linux")]
+        let pattern = "**/libskyr_plugin_*.so";
+
+        #[cfg(target_os = "window")]
+        let pattern = "**/libskyr_plugin_*.dll";
+
+        glob::glob(pattern)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .into_iter()
             .filter_map(|d| d.ok())
@@ -145,6 +154,7 @@ async fn teardown(
 async fn sources() -> io::Result<Vec<Source>> {
     let files = glob::glob("**/*.skyr").map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let files = files
+        .filter(|r| !matches!(r, Ok(p) if p.as_os_str() == ".skyr"))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 

@@ -105,19 +105,3 @@ pub fn download_binary(
 struct DownloadEndpointResponse {
     download_url: String,
 }
-
-/*
-
-    let mut target_file = PathBuf::new();
-    target_file.push(".skyr");
-    target_file.push("terraform_providers");
-    target_file.push(host);
-    target_file.push(publisher);
-    target_file.push(provider_name);
-    target_file.push(version);
-
-    async_std::fs::create_dir_all(&target_file).await?;
-
-    if !target_file.exists() {
-    }
-*/
