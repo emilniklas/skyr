@@ -1,12 +1,12 @@
 use async_std::fs::OpenOptions;
 use async_std::io::{ReadExt, WriteExt};
 use serde::{Deserialize, Serialize};
-use skyr::Resource;
-use skyr::TypeOf;
+use skyr::{Resource, TypeOf};
 use std::io;
 
-#[derive(Serialize, Deserialize, PartialEq, TypeOf)]
+#[derive(PartialEq, Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
+#[module = "FileSystem"]
 pub struct FileArgs {
     path: String,
     content: String,
@@ -14,6 +14,7 @@ pub struct FileArgs {
 
 #[derive(Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
+#[module = "FileSystem"]
 pub struct File {
     path: String,
     content: String,

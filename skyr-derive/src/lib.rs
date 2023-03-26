@@ -9,18 +9,7 @@ use syn::{
     FieldsUnnamed,
 };
 
-#[proc_macro_attribute]
-pub fn skyr(_attribute: TokenStream, input: TokenStream) -> TokenStream {
-    let input: DeriveInput = parse_macro_input!(input as DeriveInput);
-
-    TokenStream::from(quote! {
-        #[derive(serde::Serialize, serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        #input
-    })
-}
-
-#[proc_macro_derive(TypeOf)]
+#[proc_macro_derive(TypeOf, attributes(module))]
 pub fn type_of_derive(input: TokenStream) -> TokenStream {
     let DeriveInput {
         ident,
@@ -34,23 +23,20 @@ pub fn type_of_derive(input: TokenStream) -> TokenStream {
 
     let type_name = attrs
         .iter()
-        .find(|a| a.path.is_ident("skyr"))
+        .find(|a| a.path.is_ident("module"))
         .map(|a| {
-            let assignment: syn::ExprAssign = a.parse_args().unwrap();
+            let error_msg = r#"module attribute should look like `module = "MyModule"`"#;
 
-            match *assignment.left {
-                syn::Expr::Path(syn::ExprPath { path: p, .. }) if p.is_ident("module") => {
-                    match *assignment.right {
-                        syn::Expr::Lit(syn::ExprLit { lit, .. }) => lit,
-                        v => panic!("unsupported skyr `module` attribute value {:?}", v),
-                    }
-                }
-                p => panic!("unsupported skyr attribute {:?}", p),
+            let meta = a.parse_meta().expect(error_msg);
+
+            match meta {
+                syn::Meta::NameValue(m) => m.lit,
+                _ => panic!("{}", error_msg),
             }
         })
         .map(|prefix| {
             quote! {
-                concat!(stringify!(#ident), ".", #prefix)
+                concat!(#prefix, ".", stringify!(#ident))
             }
         })
         .unwrap_or(quote! {

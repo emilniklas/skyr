@@ -1,6 +1,7 @@
 use std::io;
 
-use skyr::{deletable_resources, export_plugin, skyr, Collection, TypeOf};
+use serde::{Deserialize, Serialize};
+use skyr::{deletable_resources, export_plugin, Collection, TypeOf};
 
 export_plugin!(Random);
 
@@ -37,15 +38,17 @@ impl Plugin for Random {
     deletable_resources!(IdentifierResource);
 }
 
-#[derive(PartialEq, TypeOf)]
-#[skyr(module = "Random")]
+#[derive(PartialEq, Serialize, Deserialize, TypeOf)]
+#[serde(rename_all = "camelCase")]
+#[module = "Random"]
 struct IdentifierArgs {
     name: String,
     byte_length: Option<usize>,
 }
 
-#[derive(TypeOf)]
-#[skyr(module = "Random")]
+#[derive(Serialize, Deserialize, TypeOf)]
+#[serde(rename_all = "camelCase")]
+#[module = "Random"]
 struct Identifier {
     name: String,
     hex: String,

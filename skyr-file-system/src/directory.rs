@@ -1,16 +1,17 @@
-use serde::{Deserialize, Serialize};
-use skyr::Resource;
-use skyr::TypeOf;
+use serde::{Serialize, Deserialize};
+use skyr::{Resource, TypeOf};
 use std::io;
 
-#[derive(Serialize, Deserialize, PartialEq, TypeOf)]
+#[derive(PartialEq, Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
+#[module = "FileSystem"]
 pub struct DirectoryArgs {
     path: String,
 }
 
 #[derive(Serialize, Deserialize, TypeOf)]
 #[serde(rename_all = "camelCase")]
+#[module = "FileSystem"]
 pub struct Directory {
     path: String,
 }
