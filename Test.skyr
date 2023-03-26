@@ -1,14 +1,6 @@
 import Random
-import Google
-import List
 
-google = Google {
-  project: "emilbroman"
+Random.Identifier {
+  name: "test"
+  byteLength: nil
 }
-
-List.map(List.range(5), fn(i) {
-  google.ServiceAccount {
-    accountId: "skyr-test-" + i
-    displayName: "Skyr Account"
-  }
-})

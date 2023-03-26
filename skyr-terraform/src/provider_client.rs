@@ -12,7 +12,7 @@ use async_std::os::unix::net::UnixStream;
 use async_std::process::{Child, Command};
 use inflector::Inflector;
 use serde_json::Value as JSONValue;
-use skyr::analyze::Type;
+use skyr::analyze::{CompositeType, PrimitiveType, Type};
 use skyr::{Collection, Primitive, Value};
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
@@ -382,17 +382,20 @@ impl ProviderSchema {
                     let mut arg_type = schema.as_arguments_type();
                     let identity_fields = identity_fields.get(name.as_str());
                     if identity_fields.is_none() {
-                        if let Type::Record(fields) = &mut arg_type {
-                            fields.insert(0, ("skyrKey".into(), Type::String));
+                        if let Type::Composite(CompositeType::Record(fields)) = &mut arg_type {
+                            fields.insert(
+                                0,
+                                ("skyrKey".into(), Type::Primitive(PrimitiveType::String)),
+                            );
                         }
                     }
                     let result_type = schema.as_attributes_type();
                     (
                         name.clone(),
-                        Type::function(
+                        Type::Composite(CompositeType::function(
                             [arg_type],
                             result_type.into_named(format!("{}.{}", upper_name, name)),
-                        ),
+                        )),
                     )
                 }),
         );
@@ -402,7 +405,7 @@ impl ProviderSchema {
             .as_ref()
             .map(Schema::as_arguments_type)
         {
-            Type::function([arg], resources).into_named(upper_name)
+            Type::Composite(CompositeType::function([arg], resources)).into_named(upper_name)
         } else {
             resources.into_named(upper_name)
         }
@@ -433,13 +436,13 @@ impl<'a> Schema<'a> {
     pub fn as_arguments_type(&self) -> Type {
         self.block()
             .map(|b| b.as_arguments_type())
-            .unwrap_or(Type::Void)
+            .unwrap_or(Type::Primitive(PrimitiveType::Void))
     }
 
     pub fn as_attributes_type(&self) -> Type {
         self.block()
             .map(|b| b.as_attributes_type())
-            .unwrap_or(Type::Void)
+            .unwrap_or(Type::Primitive(PrimitiveType::Void))
     }
 }
 
@@ -613,15 +616,15 @@ impl<'a> NestedBlock<'a> {
     }
 
     fn as_type(&self, include_computed: bool) -> Type {
-        let list = Type::list(
+        let list = Type::Composite(CompositeType::list(
             self.block()
                 .as_ref()
                 .map(|b| b.as_type(include_computed))
-                .unwrap_or(Type::Record(vec![])),
-        );
+                .unwrap_or(Type::Composite(CompositeType::Record(vec![]))),
+        ));
 
         if self.min_items() == 0 {
-            Type::optional(list)
+            Type::Composite(CompositeType::optional(list))
         } else {
             list
         }
@@ -673,7 +676,7 @@ impl<'a> Attribute<'a> {
             Self::V6(a) => type_from_bytes(a.r#type.as_slice()),
         };
         if self.optional() {
-            Type::optional(t)
+            Type::Composite(CompositeType::optional(t))
         } else {
             t
         }
@@ -688,9 +691,9 @@ fn type_from_bytes(bytes: &[u8]) -> Type {
 
 fn type_from_json_value(value: &JSONValue) -> Type {
     match value.as_str() {
-        Some("string") => Type::String,
-        Some("bool") => Type::Boolean,
-        Some("number") => Type::Float,
+        Some("string") => Type::Primitive(PrimitiveType::String),
+        Some("bool") => Type::Primitive(PrimitiveType::Boolean),
+        Some("number") => Type::Primitive(PrimitiveType::Float),
         _ => {
             if let Some(a) = value.as_array() {
                 let mut i = a.iter();
@@ -698,17 +701,23 @@ fn type_from_json_value(value: &JSONValue) -> Type {
                 let v = i.next();
 
                 match (c, v) {
-                    (Some("set"), Some(v)) => Type::List(Box::new(type_from_json_value(v))),
-                    (Some("list"), Some(v)) => Type::List(Box::new(type_from_json_value(v))),
-                    (Some("map"), Some(v)) => {
-                        Type::Map(Box::new(Type::String), Box::new(type_from_json_value(v)))
+                    (Some("set"), Some(v)) => {
+                        Type::Composite(CompositeType::list(type_from_json_value(v)))
                     }
-                    (Some("object"), Some(JSONValue::Object(fields))) => Type::Record(
-                        fields
-                            .iter()
-                            .map(|(k, v)| (k.to_camel_case(), type_from_json_value(v)))
-                            .collect(),
-                    ),
+                    (Some("list"), Some(v)) => {
+                        Type::Composite(CompositeType::list(type_from_json_value(v)))
+                    }
+                    (Some("map"), Some(v)) => Type::Composite(CompositeType::dict(
+                        Type::Primitive(PrimitiveType::String),
+                        type_from_json_value(v),
+                    )),
+                    (Some("object"), Some(JSONValue::Object(fields))) => {
+                        Type::Composite(CompositeType::record(
+                            fields
+                                .iter()
+                                .map(|(k, v)| (k.to_camel_case(), type_from_json_value(v))),
+                        ))
+                    }
                     x => panic!("unsupported: {:?}", x),
                 }
             } else {

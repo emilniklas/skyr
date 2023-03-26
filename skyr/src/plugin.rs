@@ -6,7 +6,7 @@ use futures::Future;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
-use crate::analyze::Type;
+use crate::analyze::{Type, CompositeType, PrimitiveType};
 use crate::execute::{ExecutionContext, RuntimeValue};
 use crate::{ResourceId, ResourceState};
 
@@ -75,103 +75,103 @@ where
     T::State: TypeOf,
 {
     fn type_of() -> Type {
-        Type::function([T::Arguments::type_of()], T::State::type_of())
+        Type::Composite(CompositeType::function([T::Arguments::type_of()], T::State::type_of()))
     }
 }
 
 impl<T: TypeOf> TypeOf for Option<T> {
     fn type_of() -> Type {
-        Type::optional(T::type_of())
+        Type::Composite(CompositeType::optional(T::type_of()))
     }
 }
 
 impl TypeOf for String {
     fn type_of() -> Type {
-        Type::String
+        Type::Primitive(PrimitiveType::String)
     }
 }
 
 impl TypeOf for &str {
     fn type_of() -> Type {
-        Type::String
+        Type::Primitive(PrimitiveType::String)
     }
 }
 
 impl<T: TypeOf> TypeOf for Vec<T> {
     fn type_of() -> Type {
-        Type::list(T::type_of())
+        Type::Composite(CompositeType::list(T::type_of()))
     }
 }
 
 impl TypeOf for i128 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for i64 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for i32 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for i16 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for i8 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for isize {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for u128 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for u64 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for u32 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for u16 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for u8 {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 
 impl TypeOf for usize {
     fn type_of() -> Type {
-        Type::Integer
+        Type::Primitive(PrimitiveType::Integer)
     }
 }
 

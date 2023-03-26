@@ -261,7 +261,11 @@ impl<'a> Executor<'a> {
         ctx: ExecutionContext<'a>,
         import: &'a Import,
     ) -> DependentValue<RuntimeValue<'a>> {
-        let external = ctx.import_map.resolve(import).await.expect("unresolved import");
+        let external = ctx
+            .import_map
+            .resolve(import)
+            .await
+            .expect("unresolved import");
 
         let value = match external {
             External::Module(m) => self.execute_module(ctx.new_empty(), m).await,
@@ -481,6 +485,21 @@ impl<'a> Executor<'a> {
                     .collect(),
             ))
             .into(),
+
+            Expression::Tuple(tuple) => {
+                if tuple.elements.len() == 1 {
+                    self.execute_expression(ctx, &tuple.elements[0])
+                } else {
+                    RuntimeValue::Collection(Collection::Tuple(
+                        tuple
+                            .elements
+                            .iter()
+                            .map(|e| self.execute_expression(ctx.clone(), e))
+                            .collect(),
+                    ))
+                    .into()
+                }
+            }
         }
     }
 

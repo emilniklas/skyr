@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_std::sync::Mutex;
 use colored::{Color, ColoredString, Colorize};
-use skyr::analyze::{Type, TypeError, TypeId};
+use skyr::analyze::{CompositeType, PrimitiveType, Type, TypeError, TypeId};
 use skyr::compile::{CompileError, Location, ParseError, Span, Token, TokenKind};
 use skyr::execute::RuntimeValue;
 use skyr::{
@@ -433,11 +433,13 @@ impl<R: Read, W: Write> GuiState<R, W> {
 
     pub fn print_type(&mut self, type_: &Type, open_types: &mut Vec<TypeId>) -> io::Result<()> {
         match type_ {
-            Type::Void => write!(self.w, "{}", "Void".bright_black().bold()),
-            Type::String => write!(self.w, "{}", "String".bold()),
-            Type::Integer => write!(self.w, "{}", "Integer".bold()),
-            Type::Float => write!(self.w, "{}", "Float".bold()),
-            Type::Boolean => write!(self.w, "{}", "Boolean".bold()),
+            Type::Primitive(PrimitiveType::Void) => {
+                write!(self.w, "{}", "Void".bright_black().bold())
+            }
+            Type::Primitive(PrimitiveType::String) => write!(self.w, "{}", "String".bold()),
+            Type::Primitive(PrimitiveType::Integer) => write!(self.w, "{}", "Integer".bold()),
+            Type::Primitive(PrimitiveType::Float) => write!(self.w, "{}", "Float".bold()),
+            Type::Primitive(PrimitiveType::Boolean) => write!(self.w, "{}", "Boolean".bold()),
             Type::Open(id) => {
                 let idx = open_types
                     .iter()
@@ -454,14 +456,17 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 write!(self.w, "{}", format!("{}", ch).bold().italic())
             }
             Type::Named(n, _) => write!(self.w, "{}", n.bold()),
-            Type::Function(p, r) => {
-                if p.len() != 1 {
+            Type::Composite(CompositeType::Function(p, r)) => {
+                let is_simple_single_arg =
+                    p.len() == 1 && matches!(p[0], Type::Primitive(_) | Type::Open(_));
+
+                if !is_simple_single_arg {
                     write!(self.w, "{}", "(".bright_black())?;
                 }
                 for param in p {
                     self.print_type(param, open_types)?;
                 }
-                if p.len() != 1 {
+                if !is_simple_single_arg {
                     write!(self.w, "{}", ")".bright_black())?;
                 }
 
@@ -469,19 +474,27 @@ impl<R: Read, W: Write> GuiState<R, W> {
 
                 self.print_type(r, open_types)
             }
-            Type::Optional(t) => {
+            Type::Composite(CompositeType::Tuple(t)) => {
+                write!(self.w, "{}", "(".bright_black())?;
+                for el in t {
+                    self.print_type(el, open_types)?;
+                }
+                write!(self.w, "{}", ")".bright_black())
+            }
+            Type::Composite(CompositeType::Optional(t)) => {
                 self.print_type(t, open_types)?;
                 write!(self.w, "{}", "?".bold())
             }
-            Type::Record(r) => self.print_collection(&Collection::record(r.clone()), |s, t| {
-                s.print_type(t, open_types)
-            }),
-            Type::List(element) => {
+            Type::Composite(CompositeType::Record(r)) => self
+                .print_collection(&Collection::record(r.clone()), |s, t| {
+                    s.print_type(t, open_types)
+                }),
+            Type::Composite(CompositeType::List(element)) => {
                 write!(self.w, "{}", "[".bright_black())?;
                 self.print_type(element, open_types)?;
                 write!(self.w, "{}", "]".bright_black())
             }
-            Type::Map(key, value) => {
+            Type::Composite(CompositeType::Dict(key, value)) => {
                 write!(self.w, "{}", "{".bright_black())?;
                 self.print_type(key, open_types)?;
                 write!(self.w, "{}", ": ".bright_black())?;
@@ -616,7 +629,11 @@ impl<R: Read, W: Write> GuiState<R, W> {
                 self.do_print_string_error(&format!("`{}` is not defined", reference_name), source)
             }
 
-            CompileError::TypeError(TypeError::Mismatch { lhs, rhs, span }) => {
+            CompileError::TypeError(TypeError::Mismatch {
+                expected: lhs,
+                assigned: rhs,
+                span,
+            }) => {
                 let source = sources
                     .get(span.source_name.as_str())
                     .copied()
@@ -644,58 +661,58 @@ impl<R: Read, W: Write> GuiState<R, W> {
                     },
                     source,
                 )
-            }
+            } /*
+              CompileError::TypeError(TypeError::MissingField {
+                  lhs: _,
+                  rhs,
+                  field,
+                  span,
+              }) => {
+                  let source = sources
+                      .get(span.source_name.as_str())
+                      .copied()
+                      .map(|s| (&span, s));
+                  self.do_print_error(
+                      |s| {
+                          write!(
+                              s.w,
+                              "{} {} {} ",
+                              "Field".red(),
+                              field.italic(),
+                              "is missing in".red()
+                          )?;
+                          s.indent();
+                          s.print_type(&rhs, &mut vec![])?;
+                          s.unindent();
 
-            CompileError::TypeError(TypeError::MissingField {
-                lhs: _,
-                rhs,
-                field,
-                span,
-            }) => {
-                let source = sources
-                    .get(span.source_name.as_str())
-                    .copied()
-                    .map(|s| (&span, s));
-                self.do_print_error(
-                    |s| {
-                        write!(
-                            s.w,
-                            "{} {} {} ",
-                            "Field".red(),
-                            field.italic(),
-                            "is missing in".red()
-                        )?;
-                        s.indent();
-                        s.print_type(&rhs, &mut vec![])?;
-                        s.unindent();
+                          Ok(())
+                      },
+                      source,
+                  )
+              }
 
-                        Ok(())
-                    },
-                    source,
-                )
-            }
+              CompileError::TypeError(TypeError::UnresolvedImport { name, span }) => {
+                  let source = sources
+                      .get(span.source_name.as_str())
+                      .copied()
+                      .map(|s| (&span, s));
+                  self.do_print_string_error(&format!("No module named `{}` is loaded", name), source)
+              }
 
-            CompileError::TypeError(TypeError::UnresolvedImport { name, span }) => {
-                let source = sources
-                    .get(span.source_name.as_str())
-                    .copied()
-                    .map(|s| (&span, s));
-                self.do_print_string_error(&format!("No module named `{}` is loaded", name), source)
-            }
-
-            CompileError::TypeError(TypeError::WrongNumberOfArguments { lhs, rhs, span }) => {
-                let source = sources
-                    .get(span.source_name.as_str())
-                    .copied()
-                    .map(|s| (&span, s));
-                self.do_print_string_error(
-                    &format!(
-                        "Function has {} parameter(s) but was given {} arguments",
-                        lhs, rhs
-                    ),
-                    source,
-                )
-            }
+              CompileError::TypeError(TypeError::WrongNumberOfArguments { lhs, rhs, span }) => {
+                  let source = sources
+                      .get(span.source_name.as_str())
+                      .copied()
+                      .map(|s| (&span, s));
+                  self.do_print_string_error(
+                      &format!(
+                          "Function has {} parameter(s) but was given {} arguments",
+                          lhs, rhs
+                      ),
+                      source,
+                  )
+              }
+              */
         }
     }
 

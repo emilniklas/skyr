@@ -107,6 +107,9 @@ pub trait Visitor<'a> {
 
     fn enter_optional_type_expression(&mut self, type_: &'a OptionalTypeExpression) {}
     fn leave_optional_type_expression(&mut self, type_: &'a OptionalTypeExpression) {}
+
+    fn enter_tuple<T: Visitable>(&mut self, tuple: &'a Tuple<T>) {}
+    fn leave_tuple<T: Visitable>(&mut self, tuple: &'a Tuple<T>) {}
 }
 
 pub trait Visitable {
@@ -337,6 +340,7 @@ pub enum Expression {
     Call(Box<Call>),
     BinaryOperation(Box<BinaryOperation>),
     List(List),
+    Tuple(Tuple<Expression>),
     Nil(Nil),
 }
 
@@ -356,6 +360,7 @@ impl Visitable for Expression {
             Expression::BinaryOperation(n) => n.visit(visitor),
             Expression::List(n) => n.visit(visitor),
             Expression::Nil(n) => n.visit(visitor),
+            Expression::Tuple(n) => n.visit(visitor),
         }
         visitor.leave_expression(self);
     }
@@ -376,6 +381,7 @@ impl HasSpan for Expression {
             Expression::BinaryOperation(n) => n.span.clone(),
             Expression::List(n) => n.span.clone(),
             Expression::Nil(n) => n.span.clone(),
+            Expression::Tuple(n) => n.span.clone(),
         }
     }
 }
@@ -455,19 +461,8 @@ impl Parser for LeafExpression {
                 kind: TokenKind::OpenParen,
                 ..
             }) => {
-                let (expression, tokens) = Expression::parse(&tokens[1..])?;
-                if let Some(Token {
-                    kind: TokenKind::CloseCurly,
-                    ..
-                }) = tokens.get(0)
-                {
-                    return Ok((expression, &tokens[1..]));
-                } else {
-                    return Err(ParseError::Expected(
-                        "closing parenthesis",
-                        tokens.get(0).map(|t| t.span.clone()),
-                    ));
-                }
+                let (tuple, tokens) = Tuple::parse(tokens)?;
+                return Ok((Expression::Tuple(tuple), tokens));
             }
 
             t => Err(ParseError::Expected(
@@ -2010,5 +2005,84 @@ impl Parser for Nil {
                 tokens.get(0).map(|t| t.span.clone()),
             ))
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Tuple<T> {
+    pub span: Span,
+    pub elements: Vec<T>,
+}
+
+impl<T: Visitable> Visitable for Tuple<T> {
+    fn visit<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        visitor.enter_tuple(self);
+        for element in &self.elements {
+            element.visit(visitor);
+        }
+        visitor.leave_tuple(self);
+    }
+}
+
+impl<T: Parser<Output = T>> Parser for Tuple<T> {
+    type Output = Self;
+
+    fn parse<'a>(mut tokens: &'a [Token<'a>]) -> ParseResult<'a, Self::Output> {
+        let start;
+        if let Some(Token {
+            kind: TokenKind::OpenParen,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            start = span;
+        } else {
+            return Err(ParseError::Expected(
+                "list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        let mut elements = vec![];
+        while tokens
+            .get(0)
+            .map(|t| !matches!(t.kind, TokenKind::CloseParen))
+            .unwrap_or(false)
+        {
+            let element;
+            (element, tokens) = T::parse(tokens)?;
+            elements.push(element);
+
+            if let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = tokens.get(0)
+            {
+                tokens = &tokens[1..];
+            }
+        }
+
+        let end;
+        if let Some(Token {
+            kind: TokenKind::CloseParen,
+            span,
+        }) = tokens.get(0)
+        {
+            tokens = &tokens[1..];
+            end = span;
+        } else {
+            return Err(ParseError::Expected(
+                "end of list",
+                tokens.get(0).map(|t| t.span.clone()),
+            ));
+        }
+
+        Ok((
+            Tuple {
+                span: start.through(end),
+                elements,
+            },
+            tokens,
+        ))
     }
 }

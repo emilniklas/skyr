@@ -22,6 +22,12 @@ impl Default for Location {
     }
 }
 
+impl From<(u64, u64)> for Location {
+    fn from((line, character): (u64, u64)) -> Self {
+        Self { line, character }
+    }
+}
+
 impl Location {
     pub fn increment_character(&mut self) {
         self.character += 1;
@@ -37,6 +43,12 @@ impl Location {
 pub struct Span {
     pub source_name: Arc<String>,
     pub range: std::ops::Range<Location>,
+}
+
+impl PartialEq for Span {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source_name, &other.source_name) && self.range == other.range
+    }
 }
 
 impl Span {
@@ -58,7 +70,7 @@ impl Span {
 
 impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{:?}", self.source_name, self.range.start)
+        write!(f, "{}:{:?}->{:?}", self.source_name, self.range.start, self.range.end)
     }
 }
 

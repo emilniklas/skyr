@@ -1,4 +1,4 @@
-use skyr::analyze::Type;
+use skyr::analyze::{CompositeType, Type};
 use skyr::execute::{ExecutionContext, RuntimeValue};
 use skyr::{deletable_resources, export_plugin};
 use skyr::{Plugin, TypeOf};
@@ -18,10 +18,10 @@ impl Plugin for FileSystem {
     fn module_type(&self) -> Type {
         Type::named(
             "FileSystem",
-            Type::record([
+            Type::Composite(CompositeType::record([
                 ("File", file::FileResource::type_of()),
                 ("Directory", directory::DirectoryResource::type_of()),
-            ]),
+            ])),
         )
     }
 

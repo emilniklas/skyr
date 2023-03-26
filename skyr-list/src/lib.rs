@@ -25,7 +25,7 @@ impl Plugin for List {
                     Type::function([Type::list(t.clone())], Type::optional(t))
                 }),
                 ("range", {
-                    Type::function([Type::Integer], Type::list(Type::Integer))
+                    Type::function([Type::INTEGER], Type::list(Type::INTEGER))
                 }),
                 ("map", {
                     let a = Type::open();

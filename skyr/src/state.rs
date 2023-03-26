@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::analyze::Type;
 use crate::Value;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceId {
     pub type_: Type,
     pub id: String,

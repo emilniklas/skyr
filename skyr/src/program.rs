@@ -1,4 +1,9 @@
-use crate::analyze::{ImportMap, SymbolCollector, SymbolTable, TypeChecker};
+use async_std::stream::StreamExt;
+use futures::stream::FuturesOrdered;
+
+use crate::analyze::{
+    ImportMap, SymbolCollector, SymbolTable, TypeCheckResult, TypeChecker, TypeEnvironment,
+};
 use crate::compile::{CompileError, Module, Visitable};
 use crate::execute::{ExecutionContext, Executor};
 use crate::{Plan, PluginCell, PluginFactory, ResourceError, Source, State};
@@ -40,7 +45,7 @@ pub struct ParsedProgram {
 }
 
 impl ParsedProgram {
-    pub fn analyze(&self) -> Result<AnalyzedProgram, CompileError> {
+    pub async fn analyze(&self) -> Result<AnalyzedProgram, CompileError> {
         let mut error = None;
 
         let mut collector = SymbolCollector::new();
@@ -50,13 +55,25 @@ impl ParsedProgram {
         let mut table = collector.finalize(&mut error);
 
         let import_map = ImportMap::new(self.modules.as_slice(), self.plugins.as_slice());
-        let mut checker = TypeChecker::new(&mut table, import_map.clone());
+        let checker = TypeChecker::new(&mut table, import_map.clone());
+
+        let mut fo = FuturesOrdered::new();
+
         for module in self.modules.iter() {
-            checker.check_module(module);
+            fo.push_back(async {
+                let mut env = TypeEnvironment::new();
+                checker.check_module(module, &mut env).await
+            });
         }
 
+        let type_check_result = fo
+            .fold(TypeCheckResult::new(), |accum, result| {
+                accum.flat_map(|_| result.map(|_| ()))
+            })
+            .await;
+
         CompileError::coalesce(
-            CompileError::from_iter(checker.finalize().into_iter().map(CompileError::TypeError)),
+            CompileError::from_iter(type_check_result.into_iter().map(CompileError::TypeError)),
             &mut error,
         );
 

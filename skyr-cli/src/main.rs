@@ -248,7 +248,7 @@ async fn analyze<'a>(
     sources: &Vec<Source>,
     program: &'a skyr::ParsedProgram,
 ) -> io::Result<skyr::AnalyzedProgram<'a>> {
-    match program.analyze() {
+    match program.analyze().await {
         Ok(p) => Ok(p),
         Err(e) => {
             gui.print_compile_error(e, sources).await?;

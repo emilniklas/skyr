@@ -1,13 +1,12 @@
 use std::io;
 
-use serde::{Deserialize, Serialize};
-use skyr::{deletable_resources, export_plugin, Collection, TypeOf};
+use skyr::{deletable_resources, export_plugin, skyr, Collection, TypeOf};
 
 export_plugin!(Random);
 
 use rand::RngCore;
 
-use skyr::analyze::Type;
+use skyr::analyze::{CompositeType, Type};
 use skyr::execute::{ExecutionContext, RuntimeValue};
 use skyr::{Plugin, Resource};
 
@@ -21,7 +20,10 @@ impl Plugin for Random {
     fn module_type(&self) -> Type {
         Type::named(
             "Random",
-            Type::record([("Identifier", IdentifierResource::type_of())]),
+            Type::Composite(CompositeType::record([(
+                "Identifier",
+                IdentifierResource::type_of(),
+            )])),
         )
     }
 
@@ -35,15 +37,15 @@ impl Plugin for Random {
     deletable_resources!(IdentifierResource);
 }
 
-#[derive(Serialize, Deserialize, PartialEq, TypeOf)]
-#[serde(rename_all = "camelCase")]
+#[derive(PartialEq, TypeOf)]
+#[skyr(module = "Random")]
 struct IdentifierArgs {
     name: String,
     byte_length: Option<usize>,
 }
 
-#[derive(Serialize, Deserialize, TypeOf)]
-#[serde(rename_all = "camelCase")]
+#[derive(TypeOf)]
+#[skyr(module = "Random")]
 struct Identifier {
     name: String,
     hex: String,
