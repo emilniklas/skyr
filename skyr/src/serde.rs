@@ -8,7 +8,8 @@ use serde::ser::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Collection, Primitive, Value};
+use crate::analyze::{CompositeType, PrimitiveType, Type};
+use crate::{Collection, Flyweight, Primitive, Value};
 
 #[derive(Debug)]
 pub enum SerializationError {
@@ -68,9 +69,10 @@ impl Serialize for Value {
                 s.end()
             }
             Value::Collection(Collection::Record(r)) => {
-                let mut s = serializer.serialize_map(Some(r.len()))?;
+                let mut s = serializer.serialize_struct("record", r.len())?;
                 for (k, v) in r {
-                    s.serialize_entry(k, v)?;
+                    let k = RECORD_FIELDS.make(k.to_string());
+                    s.serialize_field(k, v)?;
                 }
                 s.end()
             }
@@ -84,6 +86,8 @@ impl Serialize for Value {
         }
     }
 }
+
+static RECORD_FIELDS: Flyweight<String> = Flyweight::new();
 
 pub struct ValueSerializer;
 
@@ -483,17 +487,28 @@ impl<'de> Deserialize<'de> for Value {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(ValueVisitor)
+        deserializer.deserialize_any(ValueVisitor::default())
     }
 }
 
-struct ValueVisitor;
+#[derive(Default)]
+struct ValueVisitor {
+    in_struct: bool,
+}
 
 impl<'de> Visitor<'de> for ValueVisitor {
     type Value = Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(formatter, "a value")
+    }
+
+    fn visit_newtype_struct<D>(mut self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.in_struct = true;
+        deserializer.deserialize_any(self)
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
@@ -693,18 +708,21 @@ impl<'de> fmt::Debug for Deserializable<'de> {
 
 pub struct ValueDeserializer<'de> {
     value: Deserializable<'de>,
+    type_: Type,
 }
 
 impl<'de> ValueDeserializer<'de> {
-    pub fn new(value: &'de Value) -> Self {
+    pub fn new(value: &'de Value, type_: Type) -> Self {
         Self {
             value: Deserializable::Value(value),
+            type_,
         }
     }
 
     pub fn new_field_name(value: Cow<'de, str>) -> Self {
         Self {
             value: Deserializable::FieldName(value),
+            type_: Type::Primitive(PrimitiveType::String),
         }
     }
 }
@@ -716,39 +734,94 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Primitive(Primitive::Nil)) => visitor.visit_none(),
-            Deserializable::Value(Value::Primitive(Primitive::Integer(i))) => visitor.visit_i64(*i),
-            Deserializable::Value(Value::Primitive(Primitive::Float(f))) => visitor.visit_f64(*f),
-            Deserializable::Value(Value::Primitive(Primitive::Boolean(b))) => {
+        dbg!((&self.value, self.type_.as_not_named()));
+        match (self.value, self.type_.when_not_named()) {
+            (Deserializable::Value(Value::Primitive(Primitive::Nil)), _) => visitor.visit_none(),
+            (Deserializable::Value(Value::Primitive(Primitive::Integer(i))), _) => {
+                visitor.visit_i64(*i)
+            }
+            (Deserializable::Value(Value::Primitive(Primitive::Float(f))), _) => {
+                visitor.visit_f64(*f)
+            }
+            (Deserializable::Value(Value::Primitive(Primitive::Boolean(b))), _) => {
                 visitor.visit_bool(*b)
             }
-            Deserializable::Value(Value::Primitive(Primitive::String(s))) => {
+            (Deserializable::Value(Value::Primitive(Primitive::String(s))), _) => {
                 visitor.visit_str(s.as_ref())
             }
 
-            Deserializable::Value(Value::Collection(Collection::List(l))) => {
-                visitor.visit_seq(ValueSeqDeserializer { iterator: l.iter() })
+            (
+                Deserializable::Value(Value::Collection(Collection::List(l))),
+                Type::Composite(CompositeType::List(type_)),
+            ) => visitor.visit_seq(ValueSeqDeserializer {
+                iterator: l.iter().zip(std::iter::repeat(*type_)),
+            }),
+            (Deserializable::Value(Value::Collection(Collection::List(_))), t) => Err(
+                SerializationError::Other(format!("type mismatch: {:?} is not a list type", t)),
+            ),
+
+            (
+                Deserializable::Value(Value::Collection(Collection::Dict(d))),
+                Type::Composite(CompositeType::Dict(key_type, value_type)),
+            ) => visitor.visit_map(ValueMapDeserializer {
+                key_type: *key_type,
+                value_type: *value_type,
+                iterator: d
+                    .iter()
+                    .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
+                trailing_value: None,
+            }),
+            (
+                Deserializable::Value(Value::Collection(Collection::Dict(d))),
+                Type::Composite(CompositeType::Record(r)),
+            ) => visitor.visit_map(ValueStructMapDeserializer {
+                iterator: d
+                    .iter()
+                    .filter_map(|(k, v)| match k {
+                        Value::Primitive(Primitive::String(s)) => Some((s, v)),
+                        _ => None,
+                    })
+                    .filter_map(|(k, v)| {
+                        Some((
+                            k.clone(),
+                            Deserializable::Value(v),
+                            r.iter().find_map(|(f, t)| (f == k).then_some(t))?.clone(),
+                        ))
+                    }),
+                trailing_value: None,
+            }),
+            (Deserializable::Value(Value::Collection(Collection::Dict(_))), t) => {
+                Err(SerializationError::Other(format!(
+                    "type mismatch: {:?} is not a dictionary type",
+                    t
+                )))
             }
-            Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
-                visitor.visit_map(ValueMapDeserializer {
-                    iterator: d
-                        .iter()
-                        .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
+
+            (Deserializable::Value(Value::Collection(Collection::Record(r))), t) => visitor
+                .visit_map(ValueStructMapDeserializer {
+                    iterator: r.iter().map(|(k, v)| {
+                        (
+                            k.clone(),
+                            Deserializable::Value(v),
+                            t.access_member(k.as_ref()).clone(),
+                        )
+                    }),
                     trailing_value: None,
-                })
-            }
-            Deserializable::Value(Value::Collection(Collection::Record(r))) => {
-                visitor.visit_map(ValueStructMapDeserializer {
-                    iterator: r.iter().map(|(k, v)| (k.clone(), Deserializable::Value(v))),
-                    trailing_value: None,
-                })
-            }
-            Deserializable::Value(Value::Collection(Collection::Tuple(t))) => {
-                visitor.visit_seq(ValueSeqDeserializer { iterator: t.iter() })
-            }
-            Deserializable::FieldName(f) => visitor.visit_str(f.as_ref()),
-            Deserializable::Nil => visitor.visit_none(),
+                }),
+            (
+                Deserializable::Value(Value::Collection(Collection::Tuple(t))),
+                Type::Composite(CompositeType::Tuple(type_)),
+            ) => visitor.visit_seq(ValueSeqDeserializer {
+                iterator: t.iter().zip(type_.into_iter()),
+            }),
+
+            (Deserializable::Value(Value::Collection(Collection::Tuple(_))), t) => Err(
+                SerializationError::Other(format!("type mismatch: {:?} is not a tuple type", t)),
+            ),
+
+            (Deserializable::FieldName(f), _) => visitor.visit_str(f.as_ref()),
+
+            (Deserializable::Nil, _) => visitor.visit_none(),
         }
     }
 
@@ -1091,10 +1164,13 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Collection(Collection::List(t))) => {
-                visitor.visit_seq(ValueSeqDeserializer { iterator: t.iter() })
-            }
+        match (self.value, self.type_.when_not_named()) {
+            (
+                Deserializable::Value(Value::Collection(Collection::List(t))),
+                Type::Composite(CompositeType::List(type_)),
+            ) => visitor.visit_seq(ValueSeqDeserializer {
+                iterator: t.iter().zip(std::iter::repeat(*type_)),
+            }),
             v => Err(SerializationError::Other(format!("{:?} is not a list", v))),
         }
     }
@@ -1103,16 +1179,22 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Collection(Collection::Tuple(t))) => {
+        match (self.value, self.type_.when_not_named()) {
+            (
+                Deserializable::Value(Value::Collection(Collection::Tuple(t))),
+                Type::Composite(CompositeType::Tuple(ty)),
+            ) => {
                 if t.len() != len {
                     return Err(SerializationError::Other(format!(
                         "{:?} does not match expected length of {}",
-                        self.value, len
+                        Value::Collection(Collection::Tuple(t.clone())),
+                        len
                     )));
                 }
 
-                visitor.visit_seq(ValueSeqDeserializer { iterator: t.iter() })
+                visitor.visit_seq(ValueSeqDeserializer {
+                    iterator: t.iter().zip(ty.into_iter()),
+                })
             }
             v => Err(SerializationError::Other(format!("{:?} is not a tuple", v))),
         }
@@ -1127,34 +1209,25 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Collection(Collection::Tuple(t))) => {
-                if t.len() != len {
-                    return Err(SerializationError::Other(format!(
-                        "{:?} does not match expected length of {}",
-                        self.value, len
-                    )));
-                }
-
-                visitor.visit_seq(ValueSeqDeserializer { iterator: t.iter() })
-            }
-            v => Err(SerializationError::Other(format!("{:?} is not a tuple", v))),
-        }
+        self.deserialize_tuple(len, visitor)
     }
 
     fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
-                visitor.visit_map(ValueMapDeserializer {
-                    iterator: d
-                        .iter()
-                        .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
-                    trailing_value: None,
-                })
-            }
+        match (self.value, self.type_.when_not_named()) {
+            (
+                Deserializable::Value(Value::Collection(Collection::Dict(d))),
+                Type::Composite(CompositeType::Dict(key_type, value_type)),
+            ) => visitor.visit_map(ValueMapDeserializer {
+                key_type: *key_type,
+                value_type: *value_type,
+                iterator: d
+                    .iter()
+                    .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v))),
+                trailing_value: None,
+            }),
             v => Err(SerializationError::Other(format!(
                 "{:?} is not a dictionary",
                 v
@@ -1171,38 +1244,83 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Deserializable::Value(Value::Collection(Collection::Record(r))) => {
-                visitor.visit_map(ValueStructMapDeserializer {
-                    trailing_value: None,
-                    iterator: fields.into_iter().map(|field| {
-                        match r.iter().find(|(k, _)| k == field) {
-                            None => (Cow::Owned(field.to_string()), Deserializable::Nil),
-                            Some((k, v)) => (k.clone(), Deserializable::Value(v)),
-                        }
-                    }),
-                })
-            }
-            Deserializable::Value(Value::Collection(Collection::Dict(d))) => {
-                visitor.visit_map(ValueMapDeserializer {
-                    trailing_value: None,
-                    iterator: fields.into_iter().map(|field| {
-                        d.iter()
-                            .find(|(k, _)| match k {
-                                Value::Primitive(Primitive::String(k)) => k == field,
-                                _ => false,
-                            })
-                            .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v)))
-                            .unwrap_or((
-                                Deserializable::FieldName(Cow::Borrowed(field)),
-                                Deserializable::Nil,
-                            ))
-                    }),
-                })
-            }
-            v => Err(SerializationError::Other(format!(
-                "{:?} is not a record or dictionary with string keys",
-                v
+        match (self.value, self.type_.when_not_named()) {
+            (
+                Deserializable::Value(Value::Collection(Collection::Record(r))),
+                Type::Composite(CompositeType::Record(rt)),
+            ) => visitor.visit_map(ValueStructMapDeserializer {
+                trailing_value: None,
+                iterator: fields.into_iter().map(|field| {
+                    match r.iter().find(|(k, _)| k == field) {
+                        None => (
+                            Cow::Owned(field.to_string()),
+                            Deserializable::Nil,
+                            Type::VOID,
+                        ),
+                        Some((k, v)) => (
+                            k.clone(),
+                            Deserializable::Value(v),
+                            rt.iter()
+                                .cloned()
+                                .find_map(|(f, v)| (f == *field).then_some(v))
+                                .unwrap_or(Type::VOID),
+                        ),
+                    }
+                }),
+            }),
+            (
+                Deserializable::Value(Value::Collection(Collection::Dict(d))),
+                Type::Composite(CompositeType::Dict(key_type, value_type)),
+            ) => visitor.visit_map(ValueMapDeserializer {
+                trailing_value: None,
+                key_type: *key_type,
+                value_type: *value_type,
+                iterator: fields.into_iter().map(|field| {
+                    d.iter()
+                        .find(|(k, _)| match k {
+                            Value::Primitive(Primitive::String(k)) => k == field,
+                            _ => false,
+                        })
+                        .map(|(k, v)| (Deserializable::Value(k), Deserializable::Value(v)))
+                        .unwrap_or((
+                            Deserializable::FieldName(Cow::Borrowed(field)),
+                            Deserializable::Nil,
+                        ))
+                }),
+            }),
+            (
+                Deserializable::Value(Value::Collection(Collection::Dict(r))),
+                Type::Composite(CompositeType::Record(rt)),
+            ) => visitor.visit_map(ValueStructMapDeserializer {
+                trailing_value: None,
+                iterator: fields.into_iter().map(|field| {
+                    match r
+                        .iter()
+                        .filter_map(|(k, v)| match k {
+                            Value::Primitive(Primitive::String(k)) => Some((k, v)),
+                            _ => None,
+                        })
+                        .find(|(k, _)| k == field)
+                    {
+                        None => (
+                            Cow::Owned(field.to_string()),
+                            Deserializable::Nil,
+                            Type::VOID,
+                        ),
+                        Some((k, v)) => (
+                            k.clone(),
+                            Deserializable::Value(v),
+                            rt.iter()
+                                .cloned()
+                                .find_map(|(f, v)| (f == *field).then_some(v))
+                                .unwrap_or(Type::VOID),
+                        ),
+                    }
+                }),
+            }),
+            (v, t) => Err(SerializationError::Other(format!(
+                "{:?} is not a record or dictionary with string keys as described by {:?}",
+                v, t
             ))),
         }
     }
@@ -1216,38 +1334,44 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if let Deserializable::Value(v @ Value::Collection(Collection::Tuple(t))) = self.value {
-            if t.len() > 0 {
-                if let Value::Primitive(Primitive::String(tag)) = &t[0] {
-                    for variant in variants {
-                        if variant == tag {
-                            return visitor.visit_enum(ValueEnumDeserializer {
-                                tag: &t[0],
-                                value: Some(v),
-                            });
+        match (&self.value, self.type_.when_not_named()) {
+            (Deserializable::Value(v @ Value::Collection(Collection::Tuple(t))), ty) => {
+                if t.len() > 0 {
+                    if let Value::Primitive(Primitive::String(tag)) = &t[0] {
+                        for variant in variants {
+                            if variant == tag {
+                                return visitor.visit_enum(ValueEnumDeserializer {
+                                    tag: &t[0],
+                                    value: Some(v),
+                                    type_: Some(ty),
+                                });
+                            }
                         }
+                        return Err(SerializationError::Other(format!(
+                            "{:?} is not a valid variant of {:?} {:?}",
+                            tag, name, variants
+                        )));
                     }
-                    return Err(SerializationError::Other(format!(
-                        "{:?} is not a valid variant of {:?} {:?}",
-                        tag, name, variants
-                    )));
                 }
             }
-        }
 
-        if let Deserializable::Value(t @ Value::Primitive(Primitive::String(tag))) = self.value {
-            for variant in variants {
-                if variant == tag {
-                    return visitor.visit_enum(ValueEnumDeserializer {
-                        tag: t,
-                        value: None,
-                    });
+            (Deserializable::Value(t @ Value::Primitive(Primitive::String(tag))), _) => {
+                for variant in variants {
+                    if variant == tag {
+                        return visitor.visit_enum(ValueEnumDeserializer {
+                            tag: t,
+                            value: None,
+                            type_: None,
+                        });
+                    }
                 }
+                return Err(SerializationError::Other(format!(
+                    "{:?} is not a valid variant of {:?} {:?}",
+                    tag, name, variants
+                )));
             }
-            return Err(SerializationError::Other(format!(
-                "{:?} is not a valid variant of {:?} {:?}",
-                tag, name, variants
-            )));
+
+            _ => {}
         }
 
         Err(SerializationError::Other(format!(
@@ -1283,6 +1407,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
 struct ValueEnumDeserializer<'de> {
     tag: &'de Value,
     value: Option<&'de Value>,
+    type_: Option<Type>,
 }
 
 impl<'de> EnumAccess<'de> for ValueEnumDeserializer<'de> {
@@ -1294,14 +1419,21 @@ impl<'de> EnumAccess<'de> for ValueEnumDeserializer<'de> {
     where
         V: serde::de::DeserializeSeed<'de>,
     {
-        let v = seed.deserialize(ValueDeserializer::new(self.tag))?;
+        let v = seed.deserialize(ValueDeserializer::new(self.tag, Type::STRING))?;
 
-        Ok((v, ValueVariantDeserializer { value: self.value }))
+        Ok((
+            v,
+            ValueVariantDeserializer {
+                value: self.value,
+                type_: self.type_,
+            },
+        ))
     }
 }
 
 struct ValueVariantDeserializer<'de> {
     value: Option<&'de Value>,
+    type_: Option<Type>,
 }
 
 impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
@@ -1321,15 +1453,15 @@ impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
     where
         T: serde::de::DeserializeSeed<'de>,
     {
-        match self.value {
-            Some(Value::Collection(Collection::Tuple(t))) if t.len() == 2 => {
-                seed.deserialize(ValueDeserializer::new(&t[1]))
+        match (self.value, self.type_.map(Type::when_not_named)) {
+            (Some(Value::Collection(Collection::Tuple(t))), Some(ty)) if t.len() == 2 => {
+                seed.deserialize(ValueDeserializer::new(&t[1], ty))
             }
-            Some(v) => Err(SerializationError::Other(format!(
+            (Some(v), _) => Err(SerializationError::Other(format!(
                 "{:?} should be a tagged tuple with the tag and a single value",
                 v,
             ))),
-            None => Err(SerializationError::Other(format!(
+            (None, _) => Err(SerializationError::Other(format!(
                 "Non-unit variant didn't receive a value",
             ))),
         }
@@ -1339,16 +1471,18 @@ impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Some(Value::Collection(Collection::Tuple(t))) if t.len() == len + 1 => visitor
-                .visit_seq(ValueSeqDeserializer {
-                    iterator: t.iter().skip(1),
-                }),
-            Some(v) => Err(SerializationError::Other(format!(
+        match (self.value, self.type_.map(Type::when_not_named)) {
+            (
+                Some(Value::Collection(Collection::Tuple(t))),
+                Some(Type::Composite(CompositeType::Tuple(ty))),
+            ) if t.len() == len + 1 => visitor.visit_seq(ValueSeqDeserializer {
+                iterator: t.iter().skip(1).zip(ty.into_iter()),
+            }),
+            (Some(v), _) => Err(SerializationError::Other(format!(
                 "{:?} should be a tagged tuple with {} elements (including the tag)",
                 v, len,
             ))),
-            None => Err(SerializationError::Other(format!(
+            (None, _) => Err(SerializationError::Other(format!(
                 "Non-unit variant didn't receive a value",
             ))),
         }
@@ -1362,15 +1496,23 @@ impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value {
-            Some(v @ Value::Collection(Collection::Tuple(t))) if t.len() == 2 => {
+        match (self.value, self.type_.map(Type::when_not_named)) {
+            (Some(v @ Value::Collection(Collection::Tuple(t))), Some(ty)) if t.len() == 2 => {
                 if let Value::Collection(Collection::Record(r)) = &t[1] {
                     visitor.visit_map(ValueStructMapDeserializer {
                         trailing_value: None,
                         iterator: fields.into_iter().map(|field| {
                             match r.iter().find(|(k, _)| k == field) {
-                                None => (Cow::Owned(field.to_string()), Deserializable::Nil),
-                                Some((k, v)) => (k.clone(), Deserializable::Value(v)),
+                                None => (
+                                    Cow::Owned(field.to_string()),
+                                    Deserializable::Nil,
+                                    ty.access_member(field).clone(),
+                                ),
+                                Some((k, v)) => (
+                                    k.clone(),
+                                    Deserializable::Value(v),
+                                    ty.access_member(k.as_ref()).clone(),
+                                ),
                             }
                         }),
                     })
@@ -1381,11 +1523,11 @@ impl<'de> VariantAccess<'de> for ValueVariantDeserializer<'de> {
                     )))
                 }
             }
-            Some(v) => Err(SerializationError::Other(format!(
+            (Some(v), _) => Err(SerializationError::Other(format!(
                 "{:?} should be a tagged tuple with a record",
                 v,
             ))),
-            None => Err(SerializationError::Other(format!(
+            (None, _) => Err(SerializationError::Other(format!(
                 "Non-unit variant didn't receive a value",
             ))),
         }
@@ -1398,7 +1540,7 @@ struct ValueSeqDeserializer<I> {
 
 impl<'de, I> SeqAccess<'de> for ValueSeqDeserializer<I>
 where
-    I: Iterator<Item = &'de Value>,
+    I: Iterator<Item = (&'de Value, Type)>,
 {
     type Error = SerializationError;
 
@@ -1406,8 +1548,8 @@ where
     where
         T: serde::de::DeserializeSeed<'de>,
     {
-        if let Some(element) = self.iterator.next() {
-            Ok(Some(seed.deserialize(ValueDeserializer::new(element))?))
+        if let Some((element, ty)) = self.iterator.next() {
+            Ok(Some(seed.deserialize(ValueDeserializer::new(element, ty))?))
         } else {
             Ok(None)
         }
@@ -1417,6 +1559,8 @@ where
 struct ValueMapDeserializer<'de, I> {
     iterator: I,
     trailing_value: Option<Deserializable<'de>>,
+    key_type: Type,
+    value_type: Type,
 }
 
 impl<'de, I> MapAccess<'de> for ValueMapDeserializer<'de, I>
@@ -1431,7 +1575,10 @@ where
     {
         if let Some((key, value)) = self.iterator.next() {
             self.trailing_value = Some(value);
-            Ok(Some(seed.deserialize(ValueDeserializer { value: key })?))
+            Ok(Some(seed.deserialize(ValueDeserializer {
+                value: key,
+                type_: self.key_type.clone(),
+            })?))
         } else {
             Ok(None)
         }
@@ -1442,6 +1589,7 @@ where
         V: serde::de::DeserializeSeed<'de>,
     {
         seed.deserialize(ValueDeserializer {
+            type_: self.value_type.clone(),
             value: self
                 .trailing_value
                 .take()
@@ -1452,12 +1600,12 @@ where
 
 struct ValueStructMapDeserializer<'de, I> {
     iterator: I,
-    trailing_value: Option<Deserializable<'de>>,
+    trailing_value: Option<(Deserializable<'de>, Type)>,
 }
 
 impl<'de, I> MapAccess<'de> for ValueStructMapDeserializer<'de, I>
 where
-    I: Iterator<Item = (Cow<'de, str>, Deserializable<'de>)>,
+    I: Iterator<Item = (Cow<'de, str>, Deserializable<'de>, Type)>,
 {
     type Error = SerializationError;
 
@@ -1465,8 +1613,8 @@ where
     where
         K: serde::de::DeserializeSeed<'de>,
     {
-        if let Some((key, value)) = self.iterator.next() {
-            self.trailing_value = Some(value);
+        if let Some((key, value, type_)) = self.iterator.next() {
+            self.trailing_value = Some((value, type_));
             Ok(Some(
                 seed.deserialize(ValueDeserializer::new_field_name(key))?,
             ))
@@ -1479,12 +1627,12 @@ where
     where
         V: serde::de::DeserializeSeed<'de>,
     {
-        seed.deserialize(ValueDeserializer {
-            value: self
-                .trailing_value
-                .take()
-                .ok_or_else(|| SerializationError::Other("value without key".to_string()))?,
-        })
+        let (value, type_) = self
+            .trailing_value
+            .take()
+            .ok_or_else(|| SerializationError::Other("value without key".to_string()))?;
+
+        seed.deserialize(ValueDeserializer { value, type_ })
     }
 }
 
@@ -1494,39 +1642,52 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::{Collection, Primitive, Value};
+    use crate::analyze::Type;
+    use crate::{Collection, Primitive, TypeOf, Value};
 
-    fn test_value(input: Value) {
+    fn test_value(input: Value, type_: Type) {
         let serialized = Value::serialize(&input).unwrap();
         assert_eq!(serialized, input);
-        let output: Value = serialized.deserialize().unwrap();
+        let output: Value = serialized.deserialize(type_).unwrap();
         assert_eq!(output, input);
     }
 
     #[test]
     fn isometric_self_encoding_value() {
-        test_value(Value::Primitive(Primitive::Nil));
-        test_value(Value::Primitive(Primitive::Integer(123)));
-        test_value(Value::Primitive(Primitive::Float(32.432)));
-        test_value(Value::Primitive(Primitive::Boolean(true)));
-        test_value(Value::Primitive(Primitive::string("owned")));
-        test_value(Value::Primitive(Primitive::static_str("borrowed")));
+        test_value(
+            Value::Primitive(Primitive::Nil),
+            Type::optional(Type::STRING),
+        );
+        test_value(Value::Primitive(Primitive::Integer(123)), Type::INTEGER);
+        test_value(Value::Primitive(Primitive::Float(32.432)), Type::FLOAT);
+        test_value(Value::Primitive(Primitive::Boolean(true)), Type::BOOLEAN);
+        test_value(Value::Primitive(Primitive::string("owned")), Type::STRING);
+        test_value(
+            Value::Primitive(Primitive::static_str("borrowed")),
+            Type::STRING,
+        );
 
-        test_value(Value::Collection(Collection::list([
-            Value::Primitive(Primitive::Integer(123)),
-            Value::Primitive(Primitive::Integer(456)),
-        ])));
-
-        test_value(Value::Collection(Collection::dict([
-            (
-                Value::Primitive(Primitive::static_str("one")),
+        test_value(
+            Value::Collection(Collection::list([
                 Value::Primitive(Primitive::Integer(123)),
-            ),
-            (
-                Value::Primitive(Primitive::static_str("two")),
-                Value::Primitive(Primitive::static_str("hello")),
-            ),
-        ])));
+                Value::Primitive(Primitive::Integer(456)),
+            ])),
+            Type::list(Type::INTEGER),
+        );
+
+        test_value(
+            Value::Collection(Collection::dict([
+                (
+                    Value::Primitive(Primitive::static_str("one")),
+                    Value::Primitive(Primitive::Integer(123)),
+                ),
+                (
+                    Value::Primitive(Primitive::static_str("two")),
+                    Value::Primitive(Primitive::Integer(234)),
+                ),
+            ])),
+            Type::dict(Type::STRING, Type::INTEGER),
+        );
     }
 
     #[test]
@@ -1548,6 +1709,29 @@ mod tests {
             n: Vec<u8>,
         }
 
+        impl TypeOf for X {
+            fn type_of() -> Type {
+                Type::record([
+                    ("a", usize::type_of()),
+                    ("b", u64::type_of()),
+                    ("c", <()>::type_of()),
+                    ("d", <(String, i32)>::type_of()),
+                    ("e", BTreeMap::<String, usize>::type_of()),
+                    (
+                        "f",
+                        <Vec<(usize, f64, BTreeMap<String, usize>)> as TypeOf>::type_of(),
+                    ),
+                    ("g", Vec::<Y>::type_of()),
+                    ("h", Option::<u64>::type_of()),
+                    ("i", Option::<u64>::type_of()),
+                    ("k", K::type_of()),
+                    ("l", L::type_of()),
+                    ("m", M::type_of()),
+                    ("n", Vec::<u8>::type_of()),
+                ])
+            }
+        }
+
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         enum Y {
             One,
@@ -1556,14 +1740,38 @@ mod tests {
             Four { a: usize, b: f64 },
         }
 
+        impl TypeOf for Y {
+            fn type_of() -> Type {
+                Type::tuple([Type::STRING, Type::open()])
+            }
+        }
+
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct K;
+
+        impl TypeOf for K {
+            fn type_of() -> Type {
+                Type::VOID
+            }
+        }
 
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct L(String);
 
+        impl TypeOf for L {
+            fn type_of() -> Type {
+                Type::STRING
+            }
+        }
+
         #[derive(Serialize, Deserialize, Debug, PartialEq)]
         struct M(String, usize);
+
+        impl TypeOf for M {
+            fn type_of() -> Type {
+                Type::tuple([Type::STRING, Type::INTEGER])
+            }
+        }
 
         let input = X {
             a: 12,
@@ -1588,7 +1796,7 @@ mod tests {
 
         let serialized = Value::serialize(&input).unwrap();
 
-        let output: X = serialized.deserialize().unwrap();
+        let output: X = serialized.deserialize_typed().unwrap();
 
         assert_eq!(output, input);
     }
@@ -1600,8 +1808,14 @@ mod tests {
             a: Vec<u8>,
         }
 
+        impl TypeOf for X {
+            fn type_of() -> Type {
+                Type::record([("a", Vec::<u8>::type_of())])
+            }
+        }
+
         let serialized = Value::serialize(&X { a: vec![1, 2, 3] }).unwrap();
-        let value: Value = serialized.deserialize().unwrap();
+        let value: Value = serialized.deserialize(Type::default()).unwrap();
 
         assert_eq!(
             value,
@@ -1623,6 +1837,12 @@ mod tests {
             a: Vec<u8>,
         }
 
+        impl TypeOf for X {
+            fn type_of() -> Type {
+                Type::record([("a", Vec::<u8>::type_of())])
+            }
+        }
+
         let serialized = Value::serialize(&Value::Collection(Collection::Dict(vec![(
             Value::Primitive(Primitive::String("a".into())),
             Value::Collection(Collection::List(vec![
@@ -1632,8 +1852,26 @@ mod tests {
             ])),
         )])))
         .unwrap();
-        let value: X = serialized.deserialize().unwrap();
+        let value: X = serialized.deserialize_typed().unwrap();
 
         assert_eq!(value, X { a: vec![1, 2, 3] })
+    }
+
+    #[test]
+    fn serde_through_msgpack() {
+        let input = Value::record([
+            ("a", Value::dict([(Value::string("test"), Value::i64(32))])),
+            ("b", Value::list([Value::i32(12), Value::i32(34)])),
+        ]);
+
+        let serialized = rmp_serde::to_vec_named(&input).unwrap();
+
+        let output: Value = rmp_serde::from_slice(&serialized).unwrap();
+        let output = output.coerce(&Type::record([
+            ("a", Type::dict(Type::STRING, Type::INTEGER)),
+            ("b", Type::list(Type::INTEGER)),
+        ]));
+
+        assert_eq!(input, output);
     }
 }

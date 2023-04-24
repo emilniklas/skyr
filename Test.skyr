@@ -1,6 +1,17 @@
+import Google
 import Random
 
-Random.Identifier {
-  name: "test"
-  byteLength: nil
+id = Random.Identifier {
+  name: "my-identifier"
+}
+
+google = Google {
+  project: "emilbroman"
+}
+
+google.ServiceAccount {
+  accountId: "skyr-test"
+  description: "Test test"
+  displayName: "wow wow"
+  disabled: false
 }

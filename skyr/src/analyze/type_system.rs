@@ -151,7 +151,7 @@ impl SpanType {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum UnificationDirection {
     Leftward,
     Equal,
@@ -249,11 +249,11 @@ impl<'a> TypeEnvironment<'a> {
 
                 'fields: for (n, lhs_v) in lhs {
                     if let Some(rhs_v) = rhs.remove(n.as_ref()) {
-                        fields.push((n, f(self, lhs_v, rhs_v, direction)));
+                        fields.push((n, f(self, lhs_v, rhs_v, UnificationDirection::Leftward)));
                         continue 'fields;
                     }
 
-                    todo!("missing field");
+                    // todo!("missing field");
                 }
 
                 if rhs.len() > 0 {
@@ -411,9 +411,9 @@ impl<'a> TypeEnvironment<'a> {
             (
                 Type::Composite(CompositeType::Optional(lhs)),
                 SpanType::Composite(span, CompositeType::Optional(rhs)),
-                _,
+                direction,
             ) => self
-                .unify_with_direction(*lhs, *rhs, UnificationDirection::Leftward)
+                .unify_with_direction(*lhs, *rhs, direction)
                 .map(CompositeType::optional)
                 .map(|c| SpanType::Composite(span, c)),
             (
@@ -433,15 +433,16 @@ impl<'a> TypeEnvironment<'a> {
             ) => self.unify_with_direction(lhs, *rhs, UnificationDirection::Rightward),
 
             (Type::Composite(lhs), SpanType::Composite(span, rhs), _) => self
-                .unify_composite(lhs.clone(), rhs.clone(), direction, TypeEnvironment::unify_with_direction)
+                .unify_composite(
+                    lhs.clone(),
+                    rhs.clone(),
+                    direction,
+                    TypeEnvironment::unify_with_direction,
+                )
                 .map(|u| u.flip().map(|c| SpanType::Composite(span.clone(), c)))
                 .unwrap_or_else(|| {
                     TypeCheckResult::error(
-                        SpanType::Referenced(
-                            span.clone(),
-                            Type::Composite(lhs.clone()),
-                            None,
-                        ),
+                        SpanType::Referenced(span.clone(), Type::Composite(lhs.clone()), None),
                         TypeError::Mismatch {
                             expected: Type::Composite(lhs),
                             span: span.clone(),
@@ -486,6 +487,8 @@ impl Type {
     pub const VOID: Type = Type::Primitive(PrimitiveType::Void);
     pub const STRING: Type = Type::Primitive(PrimitiveType::String);
     pub const INTEGER: Type = Type::Primitive(PrimitiveType::Integer);
+    pub const FLOAT: Type = Type::Primitive(PrimitiveType::Float);
+    pub const BOOLEAN: Type = Type::Primitive(PrimitiveType::Boolean);
 
     pub fn named(n: impl Into<Cow<'static, str>>, t: impl Into<Type>) -> Self {
         Self::Named(n.into(), Box::new(t.into()))
@@ -508,8 +511,16 @@ impl Type {
         Self::Composite(CompositeType::record(i))
     }
 
+    pub fn tuple(i: impl IntoIterator<Item = impl Into<Type>>) -> Self {
+        Self::Composite(CompositeType::tuple(i))
+    }
+
     pub fn list(t: impl Into<Type>) -> Self {
         Self::Composite(CompositeType::list(t))
+    }
+
+    pub fn dict(k: impl Into<Type>, v: impl Into<Type>) -> Self {
+        Self::Composite(CompositeType::dict(k, v))
     }
 
     pub fn optional(t: impl Into<Type>) -> Self {
@@ -536,10 +547,39 @@ impl Type {
         }
     }
 
+    pub fn as_not_named(&self) -> &Self {
+        if let Self::Named(_, t) = self {
+            t.as_not_named()
+        } else {
+            self
+        }
+    }
+
     pub fn return_type(self) -> Self {
         match self.when_not_named() {
             Self::Composite(CompositeType::Function(_, r)) => *r,
             _ => Default::default(),
+        }
+    }
+
+    pub fn access_member(&self, field: &str) -> &Type {
+        if let Self::Composite(CompositeType::Record(r)) = self {
+            r.iter()
+                .find_map(|(f, v)| (f == field).then_some(v))
+                .expect(format!("{:?} is not a member of {:?}", field, self).as_str())
+        } else {
+            panic!("{:?} is not a record", self)
+        }
+    }
+
+    pub fn set_member(&mut self, field: &str, value: Type) {
+        if let Self::Composite(CompositeType::Record(r)) = self {
+            match r.iter_mut().find_map(|(f, v)| (f == field).then_some(v)) {
+                Some(v) => *v = value,
+                None => r.push((field.to_string().into(), value)),
+            }
+        } else {
+            panic!("{:?} is not a record", self)
         }
     }
 }
@@ -561,7 +601,7 @@ impl Default for Type {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum PrimitiveType {
     Void,
     String,

@@ -95,7 +95,8 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
                         })
                     }
                 }
-            }).await
+            })
+            .await
         })
     }
 
@@ -194,13 +195,18 @@ impl<'t, 'a> TypeChecker<'t, 'a> {
         self.check_expression(&member_access.subject, env)
             .await
             .map(|subject| {
-                let type_ = match Type::from(subject).when_not_named() {
+                let type_ = match Type::from(subject).clone().when_not_named() {
                     Type::Composite(CompositeType::Record(fields)) => fields
                         .into_iter()
                         .find_map(|(n, v)| (n == member_access.identifier.symbol).then_some(v)),
                     _ => None,
                 }
-                .unwrap_or_else(|| todo!("undefined field"));
+                .unwrap_or_else(|| {
+                    todo!(
+                        "undefined field {:?}",
+                        member_access.identifier.symbol.as_str()
+                    )
+                });
 
                 SpanType::Referenced(member_access.identifier.span.clone(), type_, None)
             })

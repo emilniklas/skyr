@@ -5,7 +5,7 @@ use std::{fmt, io};
 use serde::{Deserialize, Serialize};
 
 use crate::analyze::Type;
-use crate::Value;
+use crate::{Primitive, Value};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceId {
@@ -43,11 +43,23 @@ impl State {
     }
 
     pub fn open(reader: impl io::Read) -> io::Result<State> {
-        rmp_serde::from_read(reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        rmp_serde::from_read(reader)
+            .map(|mut s: State| {
+                s.coerce_state();
+                s
+            })
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     pub fn save(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        rmp_serde::encode::write(writer, &self).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        rmp_serde::encode::write_named(writer, &self)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+
+    fn coerce_state(&mut self) {
+        for state in self.resources.write().unwrap().values_mut() {
+            state.coerce_state();
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -90,6 +102,11 @@ pub struct ResourceState {
 }
 
 impl ResourceState {
+    fn coerce_state(&mut self) {
+        let state = std::mem::replace(&mut self.state, Value::Primitive(Primitive::Nil));
+        self.state = state.coerce(&self.id.type_);
+    }
+
     #[inline]
     pub fn has_type(&self, type_: &Type) -> bool {
         self.id.has_type(type_)

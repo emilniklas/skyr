@@ -10,7 +10,7 @@ use async_std::sync::RwLock;
 use futures::stream::{FuturesOrdered, FuturesUnordered};
 use futures::StreamExt;
 
-use crate::analyze::{External, ImportMap, SymbolTable};
+use crate::analyze::{External, ImportMap, SymbolTable, Type};
 use crate::{
     compile::*, DisplayAsDebug, IdentifyResource, PluginCell, Primitive, ResourceError, ResourceId,
     ResourceState, TypeBasedResource, TypeOf,
@@ -541,13 +541,14 @@ impl<'a> Executor<'a> {
         resource: R,
         id: ResourceId,
         arg_value: Value,
+        arg_type: Type,
         dependencies: Vec<ResourceId>,
     ) {
         let mut plan = self.plan.write().await;
         plan.register_create(id.clone(), arg_value.clone(), dependencies.clone(), {
             move || {
                 Box::pin(async move {
-                    let arg: R::Arguments = arg_value.deserialize().unwrap();
+                    let arg: R::Arguments = arg_value.deserialize(arg_type).unwrap();
                     let state = resource.create(arg).await?;
                     Ok(ResourceState {
                         id,
@@ -789,45 +790,77 @@ impl<'a> RuntimeValue<'a> {
     where
         R: 'a + Clone + Resource + Send + Sync,
         R::State: TypeOf,
+        R::Arguments: TypeOf,
     {
-        Self::dynamic_resource(ctx, TypeBasedResource(r))
+        Self::dynamic_resource(
+            ctx,
+            TypeBasedResource(r),
+            R::Arguments::type_of(),
+            R::State::type_of(),
+        )
     }
 
-    pub fn dynamic_resource<R>(ctx: ExecutionContext<'a>, r: R) -> DependentValue<RuntimeValue<'a>>
+    pub fn dynamic_resource<R>(
+        ctx: ExecutionContext<'a>,
+        r: R,
+        arg_type: Type,
+        state_type: Type,
+    ) -> DependentValue<RuntimeValue<'a>>
     where
         R: 'a + Clone + Resource + IdentifyResource + Send + Sync,
     {
         RuntimeValue::Function(Arc::new(move |executor, mut args| {
             let r = r.clone();
+            let arg_type = arg_type.clone();
+            let state_type = state_type.clone();
             Box::pin(
                 args.remove(0)
                     .flat_map(|raw_arg| raw_arg.into_value())
-                    .flat_map_async(move |arg_value, dependencies| async move {
-                        let new_arg: R::Arguments = arg_value.deserialize().unwrap();
+                    .flat_map_async(move |mut arg_value, dependencies| async move {
+                        arg_value = arg_value.coerce(&arg_type);
+
+                        let new_arg: R::Arguments =
+                            arg_value.deserialize(arg_type.clone()).unwrap();
 
                         let id = r.resource_id(&new_arg);
                         match ctx.state.get(&id) {
                             None => {
                                 executor
-                                    .register_create(r, id.clone(), arg_value, dependencies)
+                                    .register_create(
+                                        r,
+                                        id.clone(),
+                                        arg_value,
+                                        arg_type,
+                                        dependencies,
+                                    )
                                     .await;
                                 DependentValue::pending(vec![id])
                             }
                             Some(mut resource) => {
+                                resource.arg = resource.arg.coerce(&arg_type);
+
                                 executor
                                     .used_resources
                                     .write()
                                     .await
                                     .insert(resource.id.clone());
 
-                                let mut prev_state = resource.state.deserialize().unwrap();
-                                let mut prev_arg = resource.arg.deserialize().unwrap();
+                                let mut prev_state =
+                                    resource.state.deserialize(state_type).unwrap();
+                                let mut prev_arg =
+                                    resource.arg.deserialize(arg_type.clone()).unwrap();
 
                                 prev_state = match r.read(prev_state, &mut prev_arg).await {
                                     Ok(Some(s)) => s,
                                     Ok(None) => {
                                         executor
-                                            .register_create(r, id.clone(), arg_value, dependencies)
+                                            .register_create(
+                                                r,
+                                                id.clone(),
+                                                arg_value,
+                                                arg_type,
+                                                dependencies,
+                                            )
                                             .await;
                                         return DependentValue::pending(vec![id]);
                                     }

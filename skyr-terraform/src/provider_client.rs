@@ -128,15 +128,17 @@ impl ProviderClient {
         }
     }
 
-    pub async fn configure_provider(&mut self, arg: &Value) -> io::Result<()> {
+    pub async fn configure_provider(&mut self, arg: Value, schema: &Schema<'_>) -> io::Result<()> {
+        let arg = schema.coerce_value(arg);
+        let arg = msgpack(arg)?;
+
         let mut diagnostics: Vec<_> = match self {
             Self::V5(_, p) => {
                 let response = p
                     .prepare_provider_config(tfplugin5::prepare_provider_config::Request {
                         config: Some(tfplugin5::DynamicValue {
                             json: vec![],
-                            msgpack: rmp_serde::to_vec(arg)
-                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                            msgpack: arg.clone(),
                         }),
                     })
                     .await
@@ -153,8 +155,7 @@ impl ProviderClient {
                 .validate_provider_config(tfplugin6::validate_provider_config::Request {
                     config: Some(tfplugin6::DynamicValue {
                         json: vec![],
-                        msgpack: rmp_serde::to_vec(arg)
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                        msgpack: arg.clone(),
                     }),
                 })
                 .await
@@ -173,8 +174,7 @@ impl ProviderClient {
                         terraform_version: "x".into(),
                         config: Some(tfplugin5::DynamicValue {
                             json: vec![],
-                            msgpack: rmp_serde::to_vec(arg)
-                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                            msgpack: arg,
                         }),
                     })
                     .await
@@ -189,8 +189,7 @@ impl ProviderClient {
                         terraform_version: "x".into(),
                         config: Some(tfplugin6::DynamicValue {
                             json: vec![],
-                            msgpack: rmp_serde::to_vec(arg)
-                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                            msgpack: arg,
                         }),
                     })
                     .await
@@ -211,19 +210,27 @@ impl ProviderClient {
         Ok(())
     }
 
-    pub async fn create(&mut self, resource_name: &str, state: Value) -> tonic::Result<Value> {
+    pub async fn create(
+        &mut self,
+        resource_name: &str,
+        state: Value,
+        state_type: &Type,
+        schema: &Schema<'_>,
+    ) -> tonic::Result<Value> {
+        let state = schema.coerce_value(state);
+
         let new_state = match self {
             Self::V5(_, c) => {
-                let state = DynamicValue::v5(&state);
+                let state = DynamicValue::v5(state);
                 let response = c
                     .apply_resource_change(tfplugin5::apply_resource_change::Request {
                         type_name: resource_name.into(),
                         provider_meta: None,
                         planned_private: vec![],
                         planned_state: Some(state.clone()),
-                        prior_state: Some(DynamicValue::v5(&Value::Collection(
-                            Collection::Record(vec![]),
-                        ))),
+                        prior_state: Some(DynamicValue::v5(Value::Collection(Collection::Record(
+                            vec![],
+                        )))),
                         config: Some(state),
                     })
                     .await?
@@ -238,7 +245,7 @@ impl ProviderClient {
             }
             Self::V6(_, _) => todo!(),
         };
-        Ok(new_state.unwrap().into_value())
+        Ok(new_state.unwrap().into_value(state_type))
     }
 
     pub async fn read(
@@ -246,24 +253,28 @@ impl ProviderClient {
         resource_name: &str,
         state: Value,
         _arg: &mut Value,
+        state_type: &Type,
+        schema: &Schema<'_>,
     ) -> tonic::Result<Option<Value>> {
+        let state = schema.coerce_value(state);
+
         let new_state = match self {
             Self::V5(_, c) => c
                 .read_resource(tfplugin5::read_resource::Request {
                     type_name: resource_name.into(),
-                    current_state: Some(DynamicValue::v5(&state)),
+                    current_state: Some(DynamicValue::v5(state)),
                     private: vec![],
                     provider_meta: None,
                 })
                 .await?
                 .into_inner()
-                .new_state
-                .map(Cow::Owned)
-                .map(DynamicValue::V5),
+            .new_state
+            .map(Cow::Owned)
+            .map(DynamicValue::V5),
             Self::V6(_, c) => c
                 .read_resource(tfplugin6::read_resource::Request {
                     type_name: resource_name.into(),
-                    current_state: Some(DynamicValue::v6(&state)),
+                    current_state: Some(DynamicValue::v6(state)),
                     private: vec![],
                     provider_meta: None,
                 })
@@ -274,7 +285,7 @@ impl ProviderClient {
                 .map(DynamicValue::V6),
         };
         Ok(new_state
-            .map(DynamicValue::into_value)
+            .map(|dv| dv.into_value(state_type))
             .and_then(|v| v.nil_to_none()))
     }
 
@@ -283,17 +294,22 @@ impl ProviderClient {
         resource_name: &str,
         new_state: Value,
         prev_state: Value,
+        state_type: &Type,
+        schema: &Schema<'_>,
     ) -> tonic::Result<Value> {
+        let new_state = schema.coerce_value(new_state);
+        let prev_state = schema.coerce_value(prev_state);
+
         let new_state = match self {
             Self::V5(_, c) => {
-                let new_state = DynamicValue::v5(&new_state);
+                let new_state = DynamicValue::v5(new_state);
                 let response = c
                     .apply_resource_change(tfplugin5::apply_resource_change::Request {
                         type_name: resource_name.into(),
                         provider_meta: None,
                         planned_private: vec![],
                         planned_state: Some(new_state.clone()),
-                        prior_state: Some(DynamicValue::v5(&prev_state)),
+                        prior_state: Some(DynamicValue::v5(prev_state)),
                         config: Some(new_state),
                     })
                     .await?
@@ -308,10 +324,17 @@ impl ProviderClient {
             }
             Self::V6(_, _) => todo!(),
         };
-        Ok(new_state.unwrap().into_value())
+        Ok(new_state.unwrap().into_value(state_type))
     }
 
-    pub async fn delete(&mut self, resource_name: &str, prev_state: Value) -> tonic::Result<()> {
+    pub async fn delete(
+        &mut self,
+        resource_name: &str,
+        prev_state: Value,
+        schema: &Schema<'_>,
+    ) -> tonic::Result<()> {
+        let prev_state = schema.coerce_value(prev_state);
+
         match self {
             Self::V5(_, c) => {
                 let response = c
@@ -319,9 +342,9 @@ impl ProviderClient {
                         type_name: resource_name.into(),
                         provider_meta: None,
                         planned_private: vec![],
-                        planned_state: Some(DynamicValue::v5(&Value::Primitive(Primitive::Nil))),
-                        prior_state: Some(DynamicValue::v5(&prev_state)),
-                        config: Some(DynamicValue::v5(&Value::Primitive(Primitive::Nil))),
+                        planned_state: Some(DynamicValue::v5(Value::Primitive(Primitive::Nil))),
+                        prior_state: Some(DynamicValue::v5(prev_state)),
+                        config: Some(DynamicValue::v5(Value::Primitive(Primitive::Nil))),
                     })
                     .await?
                     .into_inner();
@@ -436,13 +459,19 @@ impl<'a> Schema<'a> {
     pub fn as_arguments_type(&self) -> Type {
         self.block()
             .map(|b| b.as_arguments_type())
-            .unwrap_or(Type::Primitive(PrimitiveType::Void))
+            .unwrap_or(Type::VOID)
     }
 
     pub fn as_attributes_type(&self) -> Type {
         self.block()
             .map(|b| b.as_attributes_type())
-            .unwrap_or(Type::Primitive(PrimitiveType::Void))
+            .unwrap_or(Type::VOID)
+    }
+
+    pub fn coerce_value(&self, value: Value) -> Value {
+        self.block()
+            .map(|b| b.coerce_value(value))
+            .unwrap_or(Value::Primitive(Primitive::Nil))
     }
 }
 
@@ -453,26 +482,31 @@ pub enum DynamicValue<'a> {
 }
 
 impl<'a> DynamicValue<'a> {
-    pub fn v5(value: &Value) -> tfplugin5::DynamicValue {
+    pub fn v5(value: Value) -> tfplugin5::DynamicValue {
         tfplugin5::DynamicValue {
             json: vec![],
-            msgpack: rmp_serde::to_vec(value).unwrap(),
+            msgpack: msgpack(value).unwrap(),
         }
     }
 
-    pub fn v6(value: &Value) -> tfplugin6::DynamicValue {
+    pub fn v6(value: Value) -> tfplugin6::DynamicValue {
         tfplugin6::DynamicValue {
             json: vec![],
-            msgpack: rmp_serde::to_vec(value).unwrap(),
+            msgpack: msgpack(value).unwrap(),
         }
     }
 
-    pub fn into_value(self) -> Value {
+    pub fn into_value(self, type_: &Type) -> Value {
         match self {
-            Self::V5(v) => rmp_serde::from_slice(&v.msgpack).unwrap(),
-            Self::V6(v) => rmp_serde::from_slice(&v.msgpack).unwrap(),
+            Self::V5(v) => rmp_serde::from_slice::<Value>(&v.msgpack).unwrap(),
+            Self::V6(v) => rmp_serde::from_slice::<Value>(&v.msgpack).unwrap(),
         }
+        .coerce_with_dict_to_record_key_map(type_, &|k| k.to_camel_case())
     }
+}
+
+fn msgpack(arg: Value) -> io::Result<Vec<u8>> {
+    rmp_serde::to_vec_named(&arg).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +593,39 @@ impl<'a> Block<'a> {
 
         Type::record(fields)
     }
+
+    pub fn coerce_value(&self, value: Value) -> Value {
+        match value {
+            Value::Collection(Collection::Record(r)) => {
+                let mut fields: BTreeMap<_, _> = r.into_iter().collect();
+
+                let mut new_fields = vec![];
+
+                for attribute in self.attributes() {
+                    new_fields.push((
+                        attribute.name().to_string().into(),
+                        match fields.remove(attribute.skyr_name().as_str()) {
+                            None => Value::Primitive(Primitive::Nil),
+                            Some(v) => attribute.coerce_value(v),
+                        },
+                    ));
+                }
+
+                for block in self.nested_blocks() {
+                    new_fields.push((
+                        block.type_name().to_string().into(),
+                        match fields.remove(block.skyr_name().as_str()) {
+                            None => Value::Primitive(Primitive::Nil),
+                            Some(v) => block.coerce_value(v),
+                        },
+                    ))
+                }
+
+                Value::Collection(Collection::Record(new_fields))
+            }
+            _ => Value::Collection(Collection::Record(vec![])),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -629,6 +696,18 @@ impl<'a> NestedBlock<'a> {
             list
         }
     }
+
+    pub fn coerce_value(&self, value: Value) -> Value {
+        match self.block() {
+            None => value,
+            Some(b) => match value {
+                Value::Collection(Collection::List(l)) => {
+                    Value::Collection(Collection::list(l.into_iter().map(|e| b.coerce_value(e))))
+                }
+                v => v,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -681,6 +760,19 @@ impl<'a> Attribute<'a> {
             t
         }
     }
+
+    pub fn coerce_value(&self, value: Value) -> Value {
+        match self {
+            Self::V5(a) => coerce_from_type_bytes(a.r#type.as_slice(), value),
+            Self::V6(a) => coerce_from_type_bytes(a.r#type.as_slice(), value),
+        }
+    }
+}
+
+fn coerce_from_type_bytes(bytes: &[u8], value: Value) -> Value {
+    let type_value: JSONValue = serde_json::from_slice(bytes).unwrap();
+
+    coerce_from_type_json_value(&type_value, value)
 }
 
 fn type_from_bytes(bytes: &[u8]) -> Type {
@@ -722,6 +814,58 @@ fn type_from_json_value(value: &JSONValue) -> Type {
                 }
             } else {
                 panic!("unsupported: {:?}", value);
+            }
+        }
+    }
+}
+
+fn coerce_from_type_json_value(type_: &JSONValue, value: Value) -> Value {
+    match (type_.as_str(), value) {
+        (_, value @ Value::Primitive(Primitive::Nil)) => value,
+        (Some("string"), v) => Value::Primitive(Primitive::String(v.to_string().into())),
+        (Some("bool"), Value::Primitive(Primitive::Boolean(b))) => {
+            Value::Primitive(Primitive::Boolean(b))
+        }
+        (Some("number"), Value::Primitive(p)) => Value::Primitive(p),
+        (_, value) => {
+            if let Some(a) = type_.as_array() {
+                let mut i = a.iter();
+                let c = i.next().and_then(|v| v.as_str());
+                let e = i.next();
+
+                match (c, e, value) {
+                    (Some("set" | "list"), Some(e), Value::Collection(Collection::List(l))) => {
+                        Value::Collection(Collection::list(
+                            l.into_iter().map(|le| coerce_from_type_json_value(e, le)),
+                        ))
+                    }
+                    (Some("map"), Some(e), Value::Collection(Collection::Dict(l))) => {
+                        Value::Collection(Collection::dict(
+                            l.into_iter()
+                                .map(|(k, v)| (k, coerce_from_type_json_value(e, v))),
+                        ))
+                    }
+                    (
+                        Some("object"),
+                        Some(JSONValue::Object(fields)),
+                        Value::Collection(Collection::Record(r)),
+                    ) => {
+                        let mut r: BTreeMap<_, _> = r.into_iter().collect();
+
+                        Value::Collection(Collection::record(fields.iter().map(|(k, t)| {
+                            (
+                                k,
+                                match r.remove(k.to_camel_case().as_str()) {
+                                    None => Value::Primitive(Primitive::Nil),
+                                    Some(v) => coerce_from_type_json_value(t, v),
+                                },
+                            )
+                        })))
+                    }
+                    x => panic!("unsupported: {:?}", x),
+                }
+            } else {
+                panic!("unsupported: {:?}", type_);
             }
         }
     }

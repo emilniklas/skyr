@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::analyze::{CompositeType, PrimitiveType, Type};
 use crate::execute::{DependentValue, RuntimeValue};
-use crate::{Diff, DisplayAsDebug, SerializationError, ValueDeserializer, ValueSerializer};
+use crate::{Diff, DisplayAsDebug, SerializationError, TypeOf, ValueDeserializer, ValueSerializer};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
@@ -12,7 +14,47 @@ pub enum Value {
     Collection(Collection<Value>),
 }
 
+impl Default for Value {
+    fn default() -> Self {
+        Self::Primitive(Primitive::Nil)
+    }
+}
+
 impl Value {
+    pub fn coerce(self, type_: &Type) -> Self {
+        match (self, type_.as_not_named()) {
+            (Value::Primitive(v), Type::Primitive(t)) => Value::Primitive(v.coerce(t)),
+            (Value::Collection(v), Type::Composite(t)) => Value::Collection(v.coerce(t)),
+            (v, _) => v,
+        }
+    }
+
+    pub fn coerce_with_dict_to_record_key_map<F>(self, type_: &Type, f: &F) -> Self
+    where
+        F: Fn(String) -> String,
+    {
+        match (self, type_.as_not_named()) {
+            (Value::Primitive(v), Type::Primitive(t)) => Value::Primitive(v.coerce(t)),
+            (Value::Collection(v), Type::Composite(t)) => {
+                Value::Collection(v.coerce_with_dict_to_record_key_map(t, f))
+            }
+            (v, _) => v,
+        }
+    }
+
+    pub fn map_record_keys<F, R>(self, f: &F) -> Self
+    where
+        F: Fn(Cow<'static, str>) -> R,
+        R: Into<Cow<'static, str>>,
+    {
+        match self {
+            Value::Collection(c) => {
+                Value::Collection(c.map_record_keys(f, |v| v.map_record_keys(f)))
+            }
+            v => v,
+        }
+    }
+
     pub fn diff<'a>(&'a self, other: &'a Self) -> Diff<'a> {
         Diff::calculate(self, other)
     }
@@ -21,8 +63,17 @@ impl Value {
         v.serialize(ValueSerializer)
     }
 
-    pub fn deserialize<'a, T: Deserialize<'a>>(&'a self) -> Result<T, SerializationError> {
-        T::deserialize(ValueDeserializer::new(self))
+    pub fn deserialize<'a, T: Deserialize<'a>>(
+        &'a self,
+        type_: Type,
+    ) -> Result<T, SerializationError> {
+        T::deserialize(ValueDeserializer::new(self, type_))
+    }
+
+    pub fn deserialize_typed<'a, T: Deserialize<'a> + TypeOf>(
+        &'a self,
+    ) -> Result<T, SerializationError> {
+        T::deserialize(ValueDeserializer::new(self, T::type_of()))
     }
 
     pub fn as_collection_mut(&mut self) -> &mut Collection<Value> {
@@ -55,6 +106,30 @@ impl Value {
         } else {
             Some(self)
         }
+    }
+
+    pub fn record(i: impl IntoIterator<Item = (impl Into<String>, impl Into<Value>)>) -> Self {
+        Self::Collection(Collection::record(i))
+    }
+
+    pub fn dict(i: impl IntoIterator<Item = (impl Into<Value>, impl Into<Value>)>) -> Self {
+        Self::Collection(Collection::dict(i))
+    }
+
+    pub fn list(i: impl IntoIterator<Item = impl Into<Value>>) -> Self {
+        Self::Collection(Collection::list(i))
+    }
+
+    pub fn string(s: impl Into<String>) -> Self {
+        Self::Primitive(Primitive::string(s))
+    }
+
+    pub fn i64(i: i64) -> Self {
+        Self::Primitive(Primitive::i64(i))
+    }
+
+    pub fn i32(i: i32) -> Self {
+        Self::Primitive(Primitive::i32(i))
     }
 }
 
@@ -123,6 +198,16 @@ impl Ord for Primitive {
 }
 
 impl Primitive {
+    pub fn coerce(self, type_: &PrimitiveType) -> Self {
+        match (self, type_) {
+            (Primitive::String(s), PrimitiveType::String) => Primitive::String(s),
+            (Primitive::Integer(i), PrimitiveType::Integer) => Primitive::Integer(i),
+            (Primitive::Float(i), PrimitiveType::Float) => Primitive::Float(i),
+            (Primitive::Boolean(i), PrimitiveType::Boolean) => Primitive::Boolean(i),
+            (v, _) => v,
+        }
+    }
+
     pub fn static_str(s: &'static str) -> Self {
         Self::String(Cow::Borrowed(s))
     }
@@ -469,7 +554,121 @@ pub enum Collection<T = Primitive> {
     Dict(Vec<(T, T)>),
 }
 
+impl Collection<Value> {
+    pub fn coerce(self, type_: &CompositeType) -> Self {
+        match (self, type_) {
+            (Collection::List(v), CompositeType::List(t)) => {
+                Collection::List(v.into_iter().map(|v| v.coerce(&*t)).collect())
+            }
+
+            (Collection::Tuple(v), CompositeType::Tuple(t)) => Collection::Tuple(
+                t.iter()
+                    .zip(v.into_iter())
+                    .map(|(t, v)| v.coerce(t))
+                    .collect(),
+            ),
+
+            (Collection::Dict(d), CompositeType::Dict(kt, vt)) => Collection::Dict(
+                d.into_iter()
+                    .map(|(k, v)| (k.coerce(kt), v.coerce(vt)))
+                    .collect(),
+            ),
+
+            (Collection::Dict(r), CompositeType::Record(rt)) => Collection::Record({
+                let mut r: BTreeMap<_, _> =
+                    r.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+
+                rt.iter()
+                    .filter_map(|(f, t)| r.remove(f.as_ref()).map(|v| (f.clone(), v.coerce(t))))
+                    .collect()
+            }),
+            (Collection::Record(r), CompositeType::Record(rt)) => Collection::Record({
+                let mut r: BTreeMap<_, _> = r.into_iter().collect();
+
+                rt.iter()
+                    .filter_map(|(f, t)| r.remove(f.as_ref()).map(|v| (f.clone(), v.coerce(t))))
+                    .collect()
+            }),
+
+            (v, _) => v,
+        }
+    }
+
+    pub fn coerce_with_dict_to_record_key_map<F>(self, type_: &CompositeType, f: &F) -> Self
+    where
+        F: Fn(String) -> String,
+    {
+        match (self, type_) {
+            (Collection::List(v), CompositeType::List(t)) => Collection::List(
+                v.into_iter()
+                    .map(|v| v.coerce_with_dict_to_record_key_map(&*t, f))
+                    .collect(),
+            ),
+
+            (Collection::Tuple(v), CompositeType::Tuple(t)) => Collection::Tuple(
+                t.iter()
+                    .zip(v.into_iter())
+                    .map(|(t, v)| v.coerce_with_dict_to_record_key_map(t, f))
+                    .collect(),
+            ),
+
+            (Collection::Dict(d), CompositeType::Dict(kt, vt)) => Collection::Dict(
+                d.into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k.coerce_with_dict_to_record_key_map(kt, f),
+                            v.coerce_with_dict_to_record_key_map(vt, f),
+                        )
+                    })
+                    .collect(),
+            ),
+
+            (Collection::Dict(r), CompositeType::Record(rt)) => Collection::Record({
+                let mut r: BTreeMap<_, _> =
+                    r.into_iter().map(|(k, v)| (f(k.to_string()), v)).collect();
+
+                rt.iter()
+                    .filter_map(|(n, t)| {
+                        r.remove(n.as_ref())
+                            .map(|v| (n.clone().into(), v.coerce_with_dict_to_record_key_map(t, f)))
+                    })
+                    .collect()
+            }),
+            (Collection::Record(r), CompositeType::Record(rt)) => Collection::Record({
+                let mut r: BTreeMap<_, _> = r.into_iter().collect();
+
+                rt.iter()
+                    .filter_map(|(n, t)| {
+                        r.remove(n.as_ref())
+                            .map(|v| (n.clone(), v.coerce_with_dict_to_record_key_map(t, f)))
+                    })
+                    .collect()
+            }),
+
+            (v, _) => v,
+        }
+    }
+}
+
 impl<T> Collection<T> {
+    pub fn map_record_keys<F, R, G>(self, f: F, g: G) -> Self
+    where
+        F: Fn(Cow<'static, str>) -> R,
+        R: Into<Cow<'static, str>>,
+        G: Fn(T) -> T,
+    {
+        match self {
+            Collection::Tuple(t) => Collection::Tuple(t.into_iter().map(|t| g(t)).collect()),
+            Collection::List(l) => Collection::List(l.into_iter().map(|t| g(t)).collect()),
+            Collection::Dict(d) => {
+                Collection::Dict(d.into_iter().map(|(k, v)| (g(k), g(v))).collect())
+            }
+            Collection::Record(r) => {
+                Collection::Record(r.into_iter().map(|(n, v)| (f(n).into(), g(v))).collect())
+            }
+        }
+    }
+
     pub fn list(i: impl IntoIterator<Item = impl Into<T>>) -> Self {
         Self::List(i.into_iter().map(|i| i.into()).collect())
     }

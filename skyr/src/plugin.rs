@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use futures::Future;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
-use crate::analyze::{Type, CompositeType, PrimitiveType};
+use crate::analyze::{CompositeType, PrimitiveType, Type};
 use crate::execute::{ExecutionContext, RuntimeValue};
 use crate::{ResourceId, ResourceState};
 
@@ -75,7 +76,10 @@ where
     T::State: TypeOf,
 {
     fn type_of() -> Type {
-        Type::Composite(CompositeType::function([T::Arguments::type_of()], T::State::type_of()))
+        Type::Composite(CompositeType::function(
+            [T::Arguments::type_of()],
+            T::State::type_of(),
+        ))
     }
 }
 
@@ -175,6 +179,48 @@ impl TypeOf for usize {
     }
 }
 
+impl TypeOf for f32 {
+    fn type_of() -> Type {
+        Type::Primitive(PrimitiveType::Float)
+    }
+}
+
+impl TypeOf for f64 {
+    fn type_of() -> Type {
+        Type::Primitive(PrimitiveType::Float)
+    }
+}
+
+impl TypeOf for () {
+    fn type_of() -> Type {
+        Type::VOID
+    }
+}
+
+impl<T1: TypeOf, T2: TypeOf> TypeOf for (T1, T2) {
+    fn type_of() -> Type {
+        Type::tuple([T1::type_of(), T2::type_of()])
+    }
+}
+
+impl<T1: TypeOf, T2: TypeOf, T3: TypeOf> TypeOf for (T1, T2, T3) {
+    fn type_of() -> Type {
+        Type::tuple([T1::type_of(), T2::type_of(), T3::type_of()])
+    }
+}
+
+impl<T1: TypeOf, T2: TypeOf, T3: TypeOf, T4: TypeOf> TypeOf for (T1, T2, T3, T4) {
+    fn type_of() -> Type {
+        Type::tuple([T1::type_of(), T2::type_of(), T3::type_of(), T4::type_of()])
+    }
+}
+
+impl<K: TypeOf, V: TypeOf> TypeOf for BTreeMap<K, V> {
+    fn type_of() -> Type {
+        Type::dict(K::type_of(), V::type_of())
+    }
+}
+
 pub trait IdentifyResource: Resource {
     fn resource_id(&self, arg: &Self::Arguments) -> ResourceId;
 
@@ -255,7 +301,7 @@ where
 
     fn try_match(resource: &ResourceState) -> Option<R::State> {
         if resource.has_type(&R::State::type_of()) {
-            resource.state.deserialize().ok()
+            resource.state.deserialize_typed().ok()
         } else {
             None
         }

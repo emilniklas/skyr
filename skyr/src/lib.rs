@@ -22,6 +22,9 @@ pub use value::*;
 mod serde;
 pub use crate::serde::*;
 
+mod flyweight;
+pub use flyweight::*;
+
 pub mod analyze;
 pub mod compile;
 pub mod execute;
